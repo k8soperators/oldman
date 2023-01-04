@@ -1,0 +1,13 @@
+domain: oldman.k8soperators.github.com
+layout:
+- quarkus.javaoperatorsdk.io/v1-alpha
+projectName: oldman
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: oldman.k8soperators.github.com
+  group: com.github.k8soperators.oldman
+  kind: OperatorObjectModel
+  version: v1alpha1
+version: "3"
