@@ -1,4 +1,4 @@
-package com.github.k8soperators.oldman.api.v1alpha;
+package com.github.k8soperators.oldman.api.v1alpha1;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.fabric8.kubernetes.api.model.Namespaced;

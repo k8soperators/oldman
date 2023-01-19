@@ -1,10 +1,13 @@
 package com.github.k8soperators.oldman;
 
-import com.github.k8soperators.oldman.api.v1alpha.OperatorObjectModel;
-import com.github.k8soperators.oldman.api.v1alpha.OperatorObjectModelStatus;
-import com.github.k8soperators.oldman.api.v1alpha.PropagatedConfigMap;
-import com.github.k8soperators.oldman.api.v1alpha.PropagatedSecret;
+import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModel;
+import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModelStatus;
+import com.github.k8soperators.oldman.api.v1alpha1.OperatorSource;
+import com.github.k8soperators.oldman.api.v1alpha1.PropagatedConfigMap;
+import com.github.k8soperators.oldman.api.v1alpha1.PropagatedData;
+import com.github.k8soperators.oldman.api.v1alpha1.PropagatedSecret;
 import io.fabric8.kubernetes.api.model.Condition;
+import io.fabric8.kubernetes.api.model.ConditionBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMapKeySelector;
@@ -14,9 +17,21 @@ import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.api.model.SecretKeySelector;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
+import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup;
+import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupBuilder;
+import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpec;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceBuilder;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionBuilder;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpecBuilder;
+import io.javaoperatorsdk.operator.api.reconciler.Cleaner;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
+import io.javaoperatorsdk.operator.api.reconciler.ControllerConfiguration;
+import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
 import io.javaoperatorsdk.operator.api.reconciler.EventSourceContext;
 import io.javaoperatorsdk.operator.api.reconciler.EventSourceInitializer;
 import io.javaoperatorsdk.operator.api.reconciler.Reconciler;
@@ -33,10 +48,17 @@ import javax.inject.Inject;
 
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.Collections;
 import java.util.Map;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
 import java.util.stream.Stream;
 
-public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectModel>, EventSourceInitializer<OperatorObjectModel> {
+import static io.javaoperatorsdk.operator.api.reconciler.Constants.WATCH_CURRENT_NAMESPACE;
+
+@ControllerConfiguration(namespaces = WATCH_CURRENT_NAMESPACE)
+public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectModel>, Cleaner<OperatorObjectModel>, EventSourceInitializer<OperatorObjectModel> {
 
     private final KubernetesClient client;
 
@@ -53,11 +75,11 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     @Override
     public Map<String, EventSource> prepareEventSources(EventSourceContext<OperatorObjectModel> context) {
         configMapEventSource.setPrimaryCache(context.getPrimaryCache());
-        SharedIndexInformer<ConfigMap> configMapInformer = client.configMaps().inNamespace("default").inform();
+        SharedIndexInformer<ConfigMap> configMapInformer = client.configMaps().inNamespace(client.getNamespace()).inform();
         configMapInformer.addEventHandler(configMapEventSource);
 
         secretEventSource.setPrimaryCache(context.getPrimaryCache());
-        SharedIndexInformer<Secret> secretInformer = client.secrets().inNamespace("default").inform();
+        SharedIndexInformer<Secret> secretInformer = client.secrets().inNamespace(client.getNamespace()).inform();
         secretInformer.addEventHandler(secretEventSource);
 
         return Map.of(
@@ -69,72 +91,196 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     public UpdateControl<OperatorObjectModel> reconcile(OperatorObjectModel model, Context<OperatorObjectModel> context) {
         //TODO: validate the model
         OperatorObjectModelStatus status = model.getOrCreateStatus();
+        status.getConditions().removeIf(c -> isCondition(c, "Error", "MissingResource"));
 
-        model.getSpec().getConfigMaps().forEach(configMap -> {
-            String sourceName = configMap.getSelector().getName();
-            ConfigMap source = client.configMaps().withName(sourceName).get();
+        model.getSpec().getOperators().forEach(operator -> reconcile(model, operator));
 
-            if (source == null) {
-                if (Boolean.FALSE.equals(configMap.getSelector().getOptional())) {
-                    Condition condition = status.getOrCreateCondition("Ready");
-                    condition.setStatus("False");
-                    condition.setReason(String.format("Missing required ConfigMap{name=%s}", sourceName));
-                    condition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());
-                }
-
-                return;
-            }
-
-            client.namespaces().createOrReplace(new NamespaceBuilder()
-                    .withNewMetadata()
-                        .withName(configMap.getNamespace())
-                    .endMetadata()
-                    .build());
-
-            client.configMaps()
-                .inNamespace(configMap.getNamespace())
-                .createOrReplace(new ConfigMapBuilder()
-                    .withNewMetadata()
-                        .withName(configMap.getName())
-                    .endMetadata()
-                    .withData(source.getData())
-                    .withBinaryData(source.getBinaryData())
-                    .build());
-        });
-
-        model.getSpec().getSecrets().forEach(secret -> {
-            String sourceName = secret.getSelector().getName();
-            Secret source = client.secrets().withName(sourceName).get();
-
-            if (source == null) {
-                if (Boolean.FALSE.equals(secret.getSelector().getOptional())) {
-                    Condition condition = status.getOrCreateCondition("Ready");
-                    condition.setStatus("False");
-                    condition.setReason(String.format("Missing required Secret{name=%s}", sourceName));
-                    condition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());
-                }
-
-                return;
-            }
-
-            client.namespaces().createOrReplace(new NamespaceBuilder()
-                    .withNewMetadata()
-                        .withName(secret.getNamespace())
-                    .endMetadata()
-                    .build());
-
-            client.secrets()
-                .inNamespace(secret.getNamespace())
-                .createOrReplace(new SecretBuilder()
-                    .withNewMetadata()
-                        .withName(secret.getName())
-                    .endMetadata()
-                    .withData(source.getData())
-                    .withStringData(source.getStringData())
-                    .build());
-        });
+        status.getConditions().stream().filter(c -> "Error".equals(c.getType())).findFirst().ifPresentOrElse(
+                c -> {
+                    Condition readyCondition = status.getOrCreateCondition("Ready");
+                    readyCondition.setStatus("False");
+                    readyCondition.setReason("ErrorConditions");
+                    readyCondition.setMessage(null);
+                    readyCondition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());
+                },
+                () -> {
+                    Condition readyCondition = status.getOrCreateCondition("Ready");
+                    readyCondition.setStatus("True");
+                    readyCondition.setReason(null);
+                    readyCondition.setMessage(null);
+                    readyCondition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());
+                });
 
         return UpdateControl.patchStatus(model);
+    }
+
+    @Override
+    public DeleteControl cleanup(OperatorObjectModel model, Context<OperatorObjectModel> context) {
+        /*
+         * - Delete created resources if no other model is a co-owner.
+         */
+        return DeleteControl.defaultDelete();
+    }
+
+    boolean isCondition(Condition condition, String type, String reason) {
+        return type.equals(condition.getType()) && reason.equals(condition.getReason());
+    }
+
+    void reconcile(OperatorObjectModel model, OperatorSource operator) {
+        OperatorObjectModelStatus status = model.getStatus();
+        String targetNamespace = operator.getNamespace();
+
+        client.namespaces().createOrReplace(new NamespaceBuilder()
+                .withNewMetadata()
+                    .withName(targetNamespace)
+                .endMetadata()
+                .build());
+
+        Optional.ofNullable(operator.getConfigMaps()).orElseGet(Collections::emptyList).forEach(configuration -> {
+            Condition condition = reconcile(configuration, ConfigMap.class, targetNamespace, (source, target) ->
+                (target == null ? new ConfigMapBuilder() : new ConfigMapBuilder(target))
+                        .editOrNewMetadata()
+                            .withNamespace(targetNamespace)
+                            .withName(configuration.getName())
+                        .endMetadata()
+                        .withData(source.getData())
+                        .withBinaryData(source.getBinaryData())
+                        .build());
+
+            if (condition != null) {
+                status.getConditions().add(condition);
+            }
+        });
+
+        Optional.ofNullable(operator.getSecrets()).orElseGet(Collections::emptyList).forEach(configuration -> {
+            Condition condition = reconcile(configuration, Secret.class, targetNamespace, (source, target) ->
+                (target == null ? new SecretBuilder() : new SecretBuilder(target))
+                        .editOrNewMetadata()
+                            .withNamespace(targetNamespace)
+                            .withName(configuration.getName())
+                        .endMetadata()
+                        .withData(source.getData())
+                        .withStringData(source.getStringData())
+                        .build());
+
+            if (condition != null) {
+                status.getConditions().add(condition);
+            }
+        });
+
+        if (operator.getCatalogSourceSpec() != null) {
+            reconcile(operator, CatalogSource.class, "-catalog", (targetName, target) ->
+                (target == null ? new CatalogSourceBuilder() : new CatalogSourceBuilder(target))
+                        .editOrNewMetadata()
+                            .withNamespace(targetNamespace)
+                            .withName(targetName)
+                        .endMetadata()
+                        .withSpec(operator.getCatalogSourceSpec())
+                        .build());
+        }
+
+        OperatorGroupSpec operatorGroup =
+                Optional.ofNullable(operator.getOperatorGroupSpec())
+                        .orElseGet(OperatorGroupSpec::new);
+
+        reconcile(operator, OperatorGroup.class, "-group", (targetName, target) ->
+            (target == null ? new OperatorGroupBuilder() : new OperatorGroupBuilder(target))
+                    .editOrNewMetadata()
+                        .withNamespace(targetNamespace)
+                        .withName(targetName)
+                    .endMetadata()
+                    .withSpec(operatorGroup)
+                    .build());
+
+        if (operator.getSubscriptionSpec() != null) {
+            reconcile(operator, Subscription.class, "-subscription", (targetName, target) -> {
+                var subscription = new SubscriptionSpecBuilder(operator.getSubscriptionSpec());
+
+                if (Boolean.FALSE.equals(subscription.hasSource())) {
+                    subscription.withSource(operator.getName() + "-catalog");
+                }
+
+                if (Boolean.FALSE.equals(subscription.hasSourceNamespace())) {
+                    subscription.withSourceNamespace(targetNamespace);
+                }
+
+                return (target == null ? new SubscriptionBuilder() : new SubscriptionBuilder(target))
+                        .editOrNewMetadata()
+                            .withNamespace(targetNamespace)
+                            .withName(targetName)
+                        .endMetadata()
+                        .withSpec(subscription.build())
+                        .build();
+            });
+        }
+    }
+
+    <T extends HasMetadata> Condition reconcile(PropagatedData configuration,
+            Class<T> resourceType,
+            String targetNamespace,
+            BinaryOperator<T> updater) {
+
+        String sourceName = configuration.getSourceName();
+        boolean sourceRequired = Boolean.FALSE.equals(configuration.isSourceOptional());
+
+        T source =  client.resources(resourceType)
+                .inNamespace(client.getNamespace())
+                .withName(sourceName)
+                .get();
+
+        if (source == null) {
+            if (sourceRequired) {
+                return new ConditionBuilder()
+                        .withType("Error")
+                        .withStatus("True")
+                        .withReason("MissingResource")
+                        .withMessage(String.format("%s{name=%s} is required", resourceType.getSimpleName(), sourceName))
+                        .withLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString())
+                        .build();
+            }
+
+            return null;
+        }
+
+        Resource<T> targetResource = client.resources(resourceType)
+                .inNamespace(targetNamespace)
+                .withName(configuration.getName());
+
+        T target = targetResource.get();
+        boolean resourceExists = (target != null);
+        target = updater.apply(source, target);
+
+        if (resourceExists) {
+            targetResource.replace(target);
+        } else {
+            targetResource.create(target);
+        }
+
+        return null;
+    }
+
+    <T extends HasMetadata> void reconcile(OperatorSource operator,
+            Class<T> resourceType,
+            String nameSuffix,
+            BiFunction<String, T, T> updater) {
+
+        String targetNamespace = operator.getNamespace();
+        String operatorName = operator.getName();
+        String targetName = operatorName + nameSuffix;
+
+        Resource<T> targetResource = client.resources(resourceType)
+                .inNamespace(targetNamespace)
+                .withName(targetName);
+
+        T target = targetResource.get();
+        boolean resourceExists = (target != null);
+        target = updater.apply(targetName, target);
+
+        if (resourceExists) {
+            targetResource.replace(target);
+        } else {
+            targetResource.create(target);
+        }
     }
 
     abstract static class ConfigurationEventSource<T extends HasMetadata> extends AbstractEventSource implements ResourceEventHandler<T> {
@@ -175,9 +321,10 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         @Override
         boolean isReferenced(OperatorObjectModel model, ConfigMap configMap) {
             return model.getSpec()
-                    .getConfigMaps()
+                    .getOperators()
                     .stream()
-                    .map(PropagatedConfigMap::getSelector)
+                    .flatMap(o -> o.getConfigMaps().stream())
+                    .map(PropagatedConfigMap::getSource)
                     .map(ConfigMapKeySelector::getName)
                     .map(name -> configMap.getMetadata().getName().equals(name))
                     .findFirst()
@@ -190,9 +337,10 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         @Override
         boolean isReferenced(OperatorObjectModel model, Secret secret) {
             return model.getSpec()
-                    .getSecrets()
+                    .getOperators()
                     .stream()
-                    .map(PropagatedSecret::getSelector)
+                    .flatMap(o -> o.getSecrets().stream())
+                    .map(PropagatedSecret::getSource)
                     .map(SecretKeySelector::getName)
                     .map(name -> secret.getMetadata().getName().equals(name))
                     .findFirst()
