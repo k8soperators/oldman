@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import io.fabric8.kubernetes.api.model.ObjectReference;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpec;
@@ -12,7 +13,7 @@ import java.util.List;
 
 @JsonDeserialize(using = com.fasterxml.jackson.databind.JsonDeserializer.None.class)
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonPropertyOrder({ "namespace", "name", "configMaps", "secrets", "catalogSourceSpec", "subscriptionSpec" })
+@JsonPropertyOrder({ "namespace", "name", "configMaps", "secrets", "operatorGroupSpec", "catalogSourceSpec", "subscriptionSpec" })
 public class OperatorSource {
 
     private String namespace;
@@ -32,7 +33,7 @@ public class OperatorSource {
     @JsonProperty("subscriptionSpec")
     private SubscriptionSpec subscriptionSpec;
 
-    private List<OperatorDependency> dependencies;
+    private List<ObjectReference> removeObjects;
 
     public String getNamespace() {
         return namespace;
@@ -90,12 +91,12 @@ public class OperatorSource {
         this.subscriptionSpec = subscriptionSpec;
     }
 
-    public List<OperatorDependency> getDependencies() {
-        return dependencies;
+    public List<ObjectReference> getRemoveObjects() {
+        return removeObjects;
     }
 
-    public void setDependencies(List<OperatorDependency> dependencies) {
-        this.dependencies = dependencies;
+    public void setRemoveObjects(List<ObjectReference> removeObjects) {
+        this.removeObjects = removeObjects;
     }
 
 }

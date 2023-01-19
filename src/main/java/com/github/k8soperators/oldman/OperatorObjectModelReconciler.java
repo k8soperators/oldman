@@ -12,7 +12,10 @@ import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMapKeySelector;
 import io.fabric8.kubernetes.api.model.HasMetadata;
+import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
+import io.fabric8.kubernetes.api.model.OwnerReference;
+import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.api.model.SecretKeySelector;
@@ -42,25 +45,29 @@ import io.javaoperatorsdk.operator.processing.event.source.EventSource;
 import io.javaoperatorsdk.operator.processing.event.source.IndexerResourceCache;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceAction;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceEvent;
+import org.jboss.logging.Logger;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
 import java.util.stream.Stream;
 
-import static io.javaoperatorsdk.operator.api.reconciler.Constants.WATCH_CURRENT_NAMESPACE;
-
-@ControllerConfiguration(namespaces = WATCH_CURRENT_NAMESPACE)
+@ControllerConfiguration
 public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectModel>, Cleaner<OperatorObjectModel>, EventSourceInitializer<OperatorObjectModel> {
 
     private final KubernetesClient client;
+
+    @Inject
+    Logger log;
 
     @Inject
     ConfigMapEventSource configMapEventSource;
@@ -89,7 +96,15 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public UpdateControl<OperatorObjectModel> reconcile(OperatorObjectModel model, Context<OperatorObjectModel> context) {
-        //TODO: validate the model
+        /*
+         * To-Do List:
+         *
+         * - Validate the model
+         * - Delete flag for each sub-resource specified in model
+         * - Allow labels/annotations on OLM resources in model
+         * - Watch subscriptions and calculate `Installing` conditions based on their status
+         * - Calculate `Ready` condition based on presence of both `Error` or `Installing` conditions
+         */
         OperatorObjectModelStatus status = model.getOrCreateStatus();
         status.getConditions().removeIf(c -> isCondition(c, "Error", "MissingResource"));
 
@@ -116,9 +131,20 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public DeleteControl cleanup(OperatorObjectModel model, Context<OperatorObjectModel> context) {
-        /*
-         * - Delete created resources if no other model is a co-owner.
-         */
+        model.getSpec()
+            .getOperators()
+            .stream()
+            .map(OperatorSource::getRemoveObjects)
+            .filter(Objects::nonNull)
+            .flatMap(Collection::stream)
+            .forEach(obj -> {
+                log.infof("Attempting removal of dependent resource: %s", obj);
+                client.genericKubernetesResources(obj.getApiVersion(), obj.getKind())
+                    .inNamespace(obj.getNamespace())
+                    .withName(obj.getName())
+                    .delete();
+            });
+
         return DeleteControl.defaultDelete();
     }
 
@@ -130,11 +156,18 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         OperatorObjectModelStatus status = model.getStatus();
         String targetNamespace = operator.getNamespace();
 
-        client.namespaces().createOrReplace(new NamespaceBuilder()
-                .withNewMetadata()
-                    .withName(targetNamespace)
-                .endMetadata()
-                .build());
+        Resource<Namespace> nsResource = client.resources(Namespace.class)
+                .withName(targetNamespace);
+        Namespace ns = nsResource.get();
+        NamespaceBuilder nsBuilder = ns == null ? new NamespaceBuilder() : new NamespaceBuilder(ns);
+
+        Namespace updatedNs = nsBuilder.editOrNewMetadata()
+                .withName(targetNamespace)
+            .endMetadata()
+            .build();
+
+        addOwnerReference(model, updatedNs);
+        client.namespaces().createOrReplace(updatedNs);
 
         Optional.ofNullable(operator.getConfigMaps()).orElseGet(Collections::emptyList).forEach(configuration -> {
             Condition condition = reconcile(configuration, ConfigMap.class, targetNamespace, (source, target) ->
@@ -159,6 +192,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .withNamespace(targetNamespace)
                             .withName(configuration.getName())
                         .endMetadata()
+                        .withType(source.getType())
                         .withData(source.getData())
                         .withStringData(source.getStringData())
                         .build());
@@ -183,7 +217,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                 Optional.ofNullable(operator.getOperatorGroupSpec())
                         .orElseGet(OperatorGroupSpec::new);
 
-        reconcile(operator, OperatorGroup.class, "-group", (targetName, target) ->
+        reconcileSingleton(operator, OperatorGroup.class, "-group", (targetName, target) ->
             (target == null ? new OperatorGroupBuilder() : new OperatorGroupBuilder(target))
                     .editOrNewMetadata()
                         .withNamespace(targetNamespace)
@@ -213,6 +247,31 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .build();
             });
         }
+    }
+
+    void addOwnerReference(HasMetadata owner, HasMetadata resource) {
+        resource.getMetadata().getOwnerReferences().stream()
+            .filter(ref -> equalOwnerReference(owner, ref))
+            .findFirst()
+            .ifPresentOrElse(
+                    or -> {
+                        or.setApiVersion(owner.getApiVersion());
+                        or.setKind(owner.getKind());
+                        or.setName(owner.getMetadata().getName());
+                        or.setUid(owner.getMetadata().getUid());
+                    },
+                    ()->
+                        resource.getMetadata().getOwnerReferences().add(new OwnerReferenceBuilder()
+                            .withApiVersion(owner.getApiVersion())
+                            .withKind(owner.getKind())
+                            .withName(owner.getMetadata().getName())
+                            .withUid(owner.getMetadata().getUid())
+                            .build()));
+    }
+
+    boolean equalOwnerReference(HasMetadata owner, OwnerReference existing) {
+        return Objects.equals(existing.getName(), owner.getMetadata().getName())
+                && Objects.equals(existing.getUid(), owner.getMetadata().getUid());
     }
 
     <T extends HasMetadata> Condition reconcile(PropagatedData configuration,
@@ -257,6 +316,29 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         }
 
         return null;
+    }
+
+    <T extends HasMetadata> void reconcileSingleton(OperatorSource operator,
+            Class<T> resourceType,
+            String nameSuffix,
+            BiFunction<String, T, T> updater) {
+
+        String targetNamespace = operator.getNamespace();
+        String targetName = targetNamespace + nameSuffix;
+
+        Resource<T> targetResource = client.resources(resourceType)
+                .inNamespace(targetNamespace)
+                .withName(targetName);
+
+        T target = targetResource.get();
+        boolean resourceExists = (target != null);
+        target = updater.apply(targetName, target);
+
+        if (resourceExists) {
+            targetResource.replace(target);
+        } else {
+            targetResource.create(target);
+        }
     }
 
     <T extends HasMetadata> void reconcile(OperatorSource operator,
