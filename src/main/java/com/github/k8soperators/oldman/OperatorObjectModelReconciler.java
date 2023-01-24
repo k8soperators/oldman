@@ -10,14 +10,12 @@ import io.fabric8.kubernetes.api.model.Condition;
 import io.fabric8.kubernetes.api.model.ConditionBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
-import io.fabric8.kubernetes.api.model.ConfigMapKeySelector;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
-import io.fabric8.kubernetes.api.model.SecretKeySelector;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
@@ -51,15 +49,18 @@ import javax.annotation.PostConstruct;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
+import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 @ControllerConfiguration
@@ -150,19 +151,35 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public DeleteControl cleanup(OperatorObjectModel model, Context<OperatorObjectModel> context) {
-        model.getSpec()
+        int remaining = model.getSpec()
             .getOperators()
             .stream()
             .map(OperatorSource::getRemoveObjects)
             .filter(Objects::nonNull)
             .flatMap(Collection::stream)
-            .forEach(obj -> {
-                log.infof("Attempting removal of dependent resource: %s", obj);
-                client.genericKubernetesResources(obj.getApiVersion(), obj.getKind())
-                    .inNamespace(obj.getNamespace())
-                    .withName(obj.getName())
-                    .delete();
-            });
+            .mapToInt(obj -> {
+                var resourceClient = client.genericKubernetesResources(obj.getApiVersion(), obj.getKind())
+                        .inNamespace(obj.getNamespace())
+                        .withName(obj.getName());
+
+                var resource = resourceClient.get();
+
+                if (resource != null) {
+                    if (resource.getMetadata().getDeletionTimestamp() == null) {
+                        log.infof("Attempting removal of dependent resource: %s", obj);
+                        resourceClient.delete();
+                    }
+                    return 1;
+                }
+
+                return 0;
+            })
+            .sum();
+
+        if (remaining > 0) {
+            return DeleteControl.noFinalizerRemoval()
+                .rescheduleAfter(Duration.ofSeconds(5));
+        }
 
         return DeleteControl.defaultDelete();
     }
@@ -194,24 +211,28 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     }
 
     static void addOwnerReference(HasMetadata owner, HasMetadata resource) {
-        resource.getMetadata().getOwnerReferences().stream()
-            .filter(existing ->
-                Objects.equals(existing.getName(), owner.getMetadata().getName()) &&
-                Objects.equals(existing.getUid(), owner.getMetadata().getUid()))
-            .findFirst()
+        addOwnerReference(owner, resource, null, null);
+    }
+
+    static void addOwnerReference(HasMetadata owner, HasMetadata resource, Boolean controller, Boolean blockOwnerDeletion) {
+        resource.getOwnerReferenceFor(owner)
             .ifPresentOrElse(
                     or -> {
                         or.setApiVersion(owner.getApiVersion());
                         or.setKind(owner.getKind());
                         or.setName(owner.getMetadata().getName());
                         or.setUid(owner.getMetadata().getUid());
+                        or.setController(controller);
+                        or.setBlockOwnerDeletion(blockOwnerDeletion);
                     },
                     () ->
-                        resource.getMetadata().getOwnerReferences().add(new OwnerReferenceBuilder()
+                        resource.addOwnerReference(new OwnerReferenceBuilder()
                             .withApiVersion(owner.getApiVersion())
                             .withKind(owner.getKind())
                             .withName(owner.getMetadata().getName())
                             .withUid(owner.getMetadata().getUid())
+                            .withController(controller)
+                            .withBlockOwnerDeletion(blockOwnerDeletion)
                             .build()));
     }
 
@@ -393,7 +414,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         }
     }
 
-    abstract static class ConfigurationEventSource<T extends HasMetadata> extends AbstractEventSource implements ResourceEventHandler<T> {
+    abstract static class ConfigurationEventSource<T extends HasMetadata, P extends PropagatedData> extends AbstractEventSource implements ResourceEventHandler<T> {
         IndexerResourceCache<OperatorObjectModel> primaryCache;
 
         public void setPrimaryCache(IndexerResourceCache<OperatorObjectModel> primaryCache) {
@@ -423,42 +444,35 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             getEventHandler().handleEvent(new ResourceEvent(ResourceAction.UPDATED, modelId, null));
         }
 
-        abstract boolean isReferenced(OperatorObjectModel model, T obj);
-    }
-
-    @ApplicationScoped
-    public static class ConfigMapEventSource extends ConfigurationEventSource<ConfigMap> {
-        @Override
-        boolean isReferenced(OperatorObjectModel model, ConfigMap configMap) {
+        boolean isReferenced(OperatorObjectModel model, T dataSource) {
             return model.getSpec()
                     .getOperators()
                     .stream()
-                    .map(OperatorSource::getConfigMaps)
+                    .map(getDataSource())
                     .filter(Objects::nonNull)
                     .flatMap(Collection::stream)
-                    .map(PropagatedConfigMap::getSource)
-                    .map(ConfigMapKeySelector::getName)
-                    .map(name -> configMap.getMetadata().getName().equals(name))
+                    .map(PropagatedData::getSourceName)
+                    .map(name -> dataSource.getMetadata().getName().equals(name))
                     .findFirst()
                     .orElse(false);
+        }
+
+        abstract Function<OperatorSource, List<P>> getDataSource();
+    }
+
+    @ApplicationScoped
+    public static class ConfigMapEventSource extends ConfigurationEventSource<ConfigMap, PropagatedConfigMap> {
+        @Override
+        Function<OperatorSource, List<PropagatedConfigMap>> getDataSource() {
+            return OperatorSource::getConfigMaps;
         }
     }
 
     @ApplicationScoped
-    public static class SecretEventSource extends ConfigurationEventSource<Secret> {
+    public static class SecretEventSource extends ConfigurationEventSource<Secret, PropagatedSecret> {
         @Override
-        boolean isReferenced(OperatorObjectModel model, Secret secret) {
-            return model.getSpec()
-                    .getOperators()
-                    .stream()
-                    .map(OperatorSource::getSecrets)
-                    .filter(Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .map(PropagatedSecret::getSource)
-                    .map(SecretKeySelector::getName)
-                    .map(name -> secret.getMetadata().getName().equals(name))
-                    .findFirst()
-                    .orElse(false);
+        Function<OperatorSource, List<PropagatedSecret>> getDataSource() {
+            return OperatorSource::getSecrets;
         }
     }
 }
