@@ -1,11 +1,14 @@
 package com.github.k8soperators.oldman;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModel;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModelStatus;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorSource;
 import com.github.k8soperators.oldman.api.v1alpha1.PropagatedConfigMap;
 import com.github.k8soperators.oldman.api.v1alpha1.PropagatedData;
 import com.github.k8soperators.oldman.api.v1alpha1.PropagatedSecret;
+import com.github.k8soperators.oldman.api.v1alpha1.Subresource;
 import io.fabric8.kubernetes.api.model.Condition;
 import io.fabric8.kubernetes.api.model.ConditionBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMap;
@@ -13,6 +16,8 @@ import io.fabric8.kubernetes.api.model.ConfigMapBuilder;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
@@ -20,15 +25,20 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.dsl.Resource;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
+import io.fabric8.kubernetes.client.informers.cache.Cache;
+import io.fabric8.kubernetes.client.informers.cache.Store;
 import io.fabric8.kubernetes.client.utils.Serialization;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceBuilder;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionBuilder;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpecBuilder;
+import io.fabric8.zjsonpatch.JsonDiff;
 import io.javaoperatorsdk.operator.api.reconciler.Cleaner;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.api.reconciler.ControllerConfiguration;
@@ -52,13 +62,15 @@ import javax.inject.Inject;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
 import java.util.stream.Stream;
@@ -76,6 +88,9 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Inject
     SecretEventSource secretEventSource;
+
+    @Inject
+    OwnedResourceEventSource ownedResources;
 
     public OperatorObjectModelReconciler(KubernetesClient client) {
         this.client = client;
@@ -108,9 +123,18 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         SharedIndexInformer<Secret> secretInformer = client.secrets().inNamespace(client.getNamespace()).inform();
         secretInformer.addEventHandler(secretEventSource);
 
+        ownedResources.setPrimaryCache(context.getPrimaryCache());
+        ownedResources.addInformer(Namespace.class, client);
+        ownedResources.addInformer(ConfigMap.class, client);
+        ownedResources.addInformer(Secret.class, client);
+        ownedResources.addInformer(CatalogSource.class, client);
+        ownedResources.addInformer(OperatorGroup.class, client);
+        ownedResources.addInformer(Subscription.class, client);
+
         return Map.of(
                 "configMapSource", configMapEventSource,
-                "secretSource", secretEventSource);
+                "secretSource", secretEventSource,
+                "ownedResources", ownedResources);
     }
 
     @Override
@@ -126,7 +150,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
          * - Calculate `Ready` condition based on presence of both `Error` or `Installing` conditions
          */
         OperatorObjectModelStatus status = model.getOrCreateStatus();
-        status.getConditions().removeIf(c -> isCondition(c, "Error", "MissingResource"));
+        status.getConditions().removeIf(c -> isConditionType(c, "Error", "Installing"));
 
         model.getSpec().getOperators().forEach(operator -> reconcile(model, operator));
 
@@ -154,7 +178,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         int remaining = model.getSpec()
             .getOperators()
             .stream()
-            .map(OperatorSource::getRemoveObjects)
+            .map(OperatorSource::getCleanupResources)
             .filter(Objects::nonNull)
             .flatMap(Collection::stream)
             .mapToInt(obj -> {
@@ -188,6 +212,10 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         return type.equals(condition.getType()) && reason.equals(condition.getReason());
     }
 
+    boolean isConditionType(Condition condition, String... types) {
+        return Arrays.asList(types).contains(condition.getType());
+    }
+
     void reconcile(OperatorObjectModel model, OperatorSource operator) {
         reconcileNamespace(model, operator);
         reconcileConfigMaps(model, operator);
@@ -198,23 +226,30 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     void reconcileNamespace(OperatorObjectModel model, OperatorSource operator) {
         String operatorNamespace = operator.getNamespace();
         Resource<Namespace> resource = client.resources(Namespace.class).withName(operatorNamespace);
-        Namespace namespace = Optional.ofNullable(resource.get())
+
+        Namespace namespace = Optional.ofNullable(ownedResources.get(Namespace.class, operatorNamespace) )
                 .map(NamespaceBuilder::new)
                 .orElseGet(NamespaceBuilder::new)
                 .editOrNewMetadata()
                     .withName(operatorNamespace)
+                    .addToLabels("app.kubernetes.io/managed-by", "oldman")
                 .endMetadata()
                 .build();
 
         addOwnerReference(model, namespace);
-        client.namespaces().createOrReplace(namespace);
+        resource.createOrReplace(namespace);
     }
 
     static void addOwnerReference(HasMetadata owner, HasMetadata resource) {
-        addOwnerReference(owner, resource, null, null);
+        addOwnerReference(owner, resource, null);
     }
 
-    static void addOwnerReference(HasMetadata owner, HasMetadata resource, Boolean controller, Boolean blockOwnerDeletion) {
+    static void addOwnerReference(HasMetadata owner, HasMetadata resource, Boolean controller) {
+        int ownerCount = resource.optionalMetadata()
+                .map(ObjectMeta::getOwnerReferences)
+                .map(Collection::size)
+                .orElse(0);
+
         resource.getOwnerReferenceFor(owner)
             .ifPresentOrElse(
                     or -> {
@@ -222,8 +257,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         or.setKind(owner.getKind());
                         or.setName(owner.getMetadata().getName());
                         or.setUid(owner.getMetadata().getUid());
-                        or.setController(controller);
-                        or.setBlockOwnerDeletion(blockOwnerDeletion);
+                        or.setController(ownerCount == 1 || Boolean.TRUE.equals(or.getController()));
                     },
                     () ->
                         resource.addOwnerReference(new OwnerReferenceBuilder()
@@ -231,49 +265,55 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .withKind(owner.getKind())
                             .withName(owner.getMetadata().getName())
                             .withUid(owner.getMetadata().getUid())
-                            .withController(controller)
-                            .withBlockOwnerDeletion(blockOwnerDeletion)
+                            .withController(ownerCount == 0)
                             .build()));
     }
 
     void reconcileConfigMaps(OperatorObjectModel model, OperatorSource operator) {
-        Optional.ofNullable(operator.getConfigMaps()).orElseGet(Collections::emptyList).forEach(configuration -> {
-            Condition condition = reconcile(configuration, ConfigMap.class, operator.getNamespace(), (source, target) ->
-                (target == null ? new ConfigMapBuilder() : new ConfigMapBuilder(target))
+        Optional.ofNullable(operator.getConfigMaps())
+            .map(Collection::stream)
+            .orElseGet(Stream::empty)
+            .map(configuration ->
+                reconcile(model, configuration, ConfigMap.class, operator.getNamespace(), (source, target) ->
+                    Optional.ofNullable(target)
+                        .map(ConfigMapBuilder::new)
+                        .orElseGet(ConfigMapBuilder::new)
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(configuration.getName())
+                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
                         .endMetadata()
                         .withData(source.getData())
                         .withBinaryData(source.getBinaryData())
-                        .build());
-
-            if (condition != null) {
-                model.getStatus().getConditions().add(condition);
-            }
-        });
+                        .build()))
+            .filter(Objects::nonNull)
+            .forEach(model.getStatus().getConditions()::add);
     }
 
     void reconcileSecrets(OperatorObjectModel model, OperatorSource operator) {
-        Optional.ofNullable(operator.getSecrets()).orElseGet(Collections::emptyList).forEach(configuration -> {
-            Condition condition = reconcile(configuration, Secret.class, operator.getNamespace(), (source, target) ->
-                (target == null ? new SecretBuilder() : new SecretBuilder(target))
+        Optional.ofNullable(operator.getSecrets())
+            .map(Collection::stream)
+            .orElseGet(Stream::empty)
+            .map(configuration ->
+                reconcile(model, configuration, Secret.class, operator.getNamespace(), (source, target) ->
+                    Optional.ofNullable(target)
+                        .map(SecretBuilder::new)
+                        .orElseGet(SecretBuilder::new)
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(configuration.getName())
+                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
                         .endMetadata()
                         .withType(source.getType())
                         .withData(source.getData())
                         .withStringData(source.getStringData())
-                        .build());
-
-            if (condition != null) {
-                model.getStatus().getConditions().add(condition);
-            }
-        });
+                        .build()))
+            .filter(Objects::nonNull)
+            .forEach(model.getStatus().getConditions()::add);
     }
 
-    <T extends HasMetadata> Condition reconcile(PropagatedData configuration,
+    <T extends HasMetadata> Condition reconcile(OperatorObjectModel model,
+            PropagatedData configuration,
             Class<T> resourceType,
             String targetNamespace,
             BinaryOperator<T> updater) {
@@ -300,117 +340,169 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             return null;
         }
 
+        T current = ownedResources.get(resourceType, targetNamespace, configuration.getName());
+        T desired = updater.apply(source, current);
+        addOwnerReference(model, desired);
+
+        String name = configuration.getName();
         Resource<T> targetResource = client.resources(resourceType)
                 .inNamespace(targetNamespace)
-                .withName(configuration.getName());
+                .withName(name);
 
-        T target = targetResource.get();
-        boolean resourceExists = (target != null);
-        target = updater.apply(source, target);
-
-        if (resourceExists) {
-            targetResource.replace(target);
+        if (current != null) {
+            if (Objects.equals(current, desired)) {
+                log.tracef("%s{namespace=%s, name=%s}: unchanged", resourceType.getSimpleName(), targetNamespace, name);
+            } else {
+                logChanged(current, desired);
+                targetResource.replace(desired);
+            }
         } else {
-            targetResource.create(target);
+            log.debugf("%s{namespace=%s, name=%s}: created", resourceType.getSimpleName(), targetNamespace, name);
+            targetResource.create(desired);
         }
 
         return null;
     }
 
     void reconcileOperatorLifecycleResources(OperatorObjectModel model, OperatorSource operator) {
-        final String targetNamespace = operator.getNamespace();
+        if (operator.getCatalogSource() != null) {
+            reconcileCatalogSource(model, operator, operator.getCatalogSource());
+        }
 
-        if (operator.getCatalogSourceSpec() != null) {
-            reconcile(operator, CatalogSource.class, "-catalog", (targetName, target) ->
-                (target == null ? new CatalogSourceBuilder() : new CatalogSourceBuilder(target))
+        reconcileOperatorGroup(model, operator, operator.getOperatorGroup());
+
+        if (operator.getSubscription() != null) {
+            reconcileSubscription(model, operator, operator.getSubscription());
+        }
+    }
+
+    void reconcileCatalogSource(OperatorObjectModel model, OperatorSource operator, Subresource<CatalogSourceSpec> subresource) {
+        reconcile(model, operator, CatalogSource.class, operator.getName() + "-catalog",
+                (existing, desired) ->
+                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
+                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                (name, existing) ->
+                    Optional.ofNullable(existing)
+                        .map(CatalogSourceBuilder::new)
+                        .orElseGet(CatalogSourceBuilder::new)
                         .editOrNewMetadata()
-                            .withNamespace(targetNamespace)
-                            .withName(targetName)
+                            .withNamespace(operator.getNamespace())
+                            .withName(name)
+                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(subresource.getLabels())
+                            .addToAnnotations(subresource.getAnnotations())
+                            .removeFromLabels(subresource.getLabelsRemoved())
+                            .removeFromAnnotations(subresource.getAnnotationsRemoved())
                         .endMetadata()
-                        .withSpec(operator.getCatalogSourceSpec())
+                        .withSpec(subresource.getSpec())
                         .build());
-        }
+    }
 
-        OperatorGroupSpec operatorGroup =
-                Optional.ofNullable(operator.getOperatorGroupSpec())
-                        .orElseGet(OperatorGroupSpec::new);
+    void reconcileOperatorGroup(OperatorObjectModel model, OperatorSource operator, Subresource<OperatorGroupSpec> operatorGroup) {
+        Subresource<OperatorGroupSpec> subresource =
+                Optional.ofNullable(operatorGroup).orElseGet(Subresource::new);
 
-        reconcileSingleton(operator, OperatorGroup.class, "-group", (targetName, target) ->
-            (target == null ? new OperatorGroupBuilder() : new OperatorGroupBuilder(target))
-                    .editOrNewMetadata()
-                        .withNamespace(targetNamespace)
-                        .withName(targetName)
-                    .endMetadata()
-                    .withSpec(operatorGroup)
-                    .build());
-
-        if (operator.getSubscriptionSpec() != null) {
-            reconcile(operator, Subscription.class, "-subscription", (targetName, target) -> {
-                var subscription = new SubscriptionSpecBuilder(operator.getSubscriptionSpec());
-
-                if (Boolean.FALSE.equals(subscription.hasSource())) {
-                    subscription.withSource(operator.getName() + "-catalog");
-                }
-
-                if (Boolean.FALSE.equals(subscription.hasSourceNamespace())) {
-                    subscription.withSourceNamespace(targetNamespace);
-                }
-
-                return (target == null ? new SubscriptionBuilder() : new SubscriptionBuilder(target))
+        reconcile(model, operator, OperatorGroup.class, operator.getNamespace() + "-group",
+                (existing, desired) ->
+                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
+                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                (name, existing) ->
+                    Optional.ofNullable(existing)
+                        .map(OperatorGroupBuilder::new)
+                        .orElseGet(OperatorGroupBuilder::new)
                         .editOrNewMetadata()
-                            .withNamespace(targetNamespace)
-                            .withName(targetName)
+                            .withNamespace(operator.getNamespace())
+                            .withName(name)
+                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(subresource.getLabels())
+                            .addToAnnotations(subresource.getAnnotations())
+                            .removeFromLabels(subresource.getLabelsRemoved())
+                            .removeFromAnnotations(subresource.getAnnotationsRemoved())
                         .endMetadata()
-                        .withSpec(subscription.build())
-                        .build();
-            });
-        }
+                        .withSpec(Optional.of(subresource)
+                                .map(Subresource::getSpec)
+                                .orElseGet(OperatorGroupSpec::new))
+                        .build());
     }
 
-    <T extends HasMetadata> void reconcileSingleton(OperatorSource operator,
+    void reconcileSubscription(OperatorObjectModel model, OperatorSource operator, Subresource<SubscriptionSpec> subresource) {
+        reconcile(model, operator, Subscription.class, operator.getName() + "-subscription",
+                (existing, desired) ->
+                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
+                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                (name, existing) -> {
+                    var subscriptionSpec = new SubscriptionSpecBuilder(subresource.getSpec());
+
+                    if (Boolean.FALSE.equals(subscriptionSpec.hasSource())) {
+                        subscriptionSpec.withSource(operator.getName() + "-catalog");
+                    }
+
+                    if (Boolean.FALSE.equals(subscriptionSpec.hasSourceNamespace())) {
+                        subscriptionSpec.withSourceNamespace(operator.getNamespace());
+                    }
+
+                    return Optional.ofNullable(existing)
+                            .map(SubscriptionBuilder::new)
+                            .orElseGet(SubscriptionBuilder::new)
+                            .editOrNewMetadata()
+                                .withNamespace(operator.getNamespace())
+                                .withName(name)
+                                .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                                .addToLabels(subresource.getLabels())
+                                .addToAnnotations(subresource.getAnnotations())
+                                .removeFromLabels(subresource.getLabelsRemoved())
+                                .removeFromAnnotations(subresource.getAnnotationsRemoved())
+                            .endMetadata()
+                            .withSpec(subscriptionSpec.build())
+                            .build();
+                });
+    }
+
+    <T extends HasMetadata> void reconcile(
+            OperatorObjectModel model,
+            OperatorSource operator,
             Class<T> resourceType,
-            String nameSuffix,
+            String name,
+            BiPredicate<T, T> hasDesiredState,
             BiFunction<String, T, T> updater) {
 
         String targetNamespace = operator.getNamespace();
-        String targetName = targetNamespace + nameSuffix;
+        T current = ownedResources.get(resourceType, targetNamespace, name);
+        T desired = updater.apply(name, current);
+
+        if (desired.getMetadata().getAnnotations().isEmpty()) {
+            desired.getMetadata().setAnnotations(null);
+        }
+
+        addOwnerReference(model, desired);
 
         Resource<T> targetResource = client.resources(resourceType)
                 .inNamespace(targetNamespace)
-                .withName(targetName);
+                .withName(name);
 
-        T target = targetResource.get();
-        boolean resourceExists = (target != null);
-        target = updater.apply(targetName, target);
-
-        if (resourceExists) {
-            targetResource.replace(target);
+        if (current != null) {
+            if (hasDesiredState.test(current, desired)) {
+                log.tracef("%s{namespace=%s, name=%s}: unchanged", resourceType.getSimpleName(), targetNamespace, name);
+            } else {
+                logChanged(current, desired);
+                targetResource.replace(desired);
+            }
         } else {
-            targetResource.create(target);
+            log.debugf("%s{namespace=%s, name=%s}: created", resourceType.getSimpleName(), targetNamespace, name);
+            targetResource.create(desired);
         }
     }
 
-    <T extends HasMetadata> void reconcile(OperatorSource operator,
-            Class<T> resourceType,
-            String nameSuffix,
-            BiFunction<String, T, T> updater) {
-
-        String targetNamespace = operator.getNamespace();
-        String operatorName = operator.getName();
-        String targetName = operatorName + nameSuffix;
-
-        Resource<T> targetResource = client.resources(resourceType)
-                .inNamespace(targetNamespace)
-                .withName(targetName);
-
-        T target = targetResource.get();
-        boolean resourceExists = (target != null);
-        target = updater.apply(targetName, target);
-
-        if (resourceExists) {
-            targetResource.replace(target);
-        } else {
-            targetResource.create(target);
+    void logChanged(HasMetadata current, HasMetadata desired) {
+        if (log.isDebugEnabled()) {
+            String kind = desired.getKind();
+            String namespace = desired.getMetadata().getNamespace();
+            String name = desired.getMetadata().getName();
+            ObjectMapper objectMapper = Serialization.yamlMapper();
+            JsonNode currentJson = objectMapper.convertValue(current, JsonNode.class);
+            JsonNode desiredJson = objectMapper.convertValue(desired, JsonNode.class);
+            JsonNode patch = JsonDiff.asJson(currentJson, desiredJson);
+            log.debugf("%s{namespace=%s, name=%s}: changed =>\n%s", kind, name, namespace, patch.toPrettyString());
         }
     }
 
@@ -473,6 +565,76 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         @Override
         Function<OperatorSource, List<PropagatedSecret>> getDataSource() {
             return OperatorSource::getSecrets;
+        }
+    }
+
+    @ApplicationScoped
+    public static class OwnedResourceEventSource extends AbstractEventSource implements ResourceEventHandler<HasMetadata> {
+        IndexerResourceCache<OperatorObjectModel> primaryCache;
+        Map<Class<? extends HasMetadata>, SharedIndexInformer<? extends HasMetadata>> informers = new HashMap<>();
+
+        public void setPrimaryCache(IndexerResourceCache<OperatorObjectModel> primaryCache) {
+            this.primaryCache = primaryCache;
+        }
+
+        public void addInformer(Class<? extends HasMetadata> type, KubernetesClient client) {
+            addInformer(type, client.resources(type)
+                        .inAnyNamespace()
+                        .withLabel("app.kubernetes.io/managed-by", "oldman")
+                        .inform());
+        }
+
+        public void addInformer(Class<? extends HasMetadata> type, SharedIndexInformer<? extends HasMetadata> informer) {
+            informer.addEventHandler(this);
+            informers.put(type, informer);
+        }
+
+        @SuppressWarnings("unchecked")
+        public <T extends HasMetadata> SharedIndexInformer<T> getInformer(Class<T> type) {
+            return (SharedIndexInformer<T>) informers.get(type);
+        }
+
+        public <T extends HasMetadata> Store<T> getStore(Class<T> type) {
+            return getInformer(type).getStore();
+        }
+
+        public <T extends HasMetadata> T get(Class<T> type, String key) {
+            return getInformer(type).getStore().getByKey(key);
+        }
+
+        public <T extends HasMetadata> T get(Class<T> type, String namespace, String name) {
+            return get(type, Cache.namespaceKeyFunc(namespace, name));
+        }
+
+        @Override
+        public void onAdd(HasMetadata obj) {
+            getOwners(obj).forEach(this::handleEvent);
+        }
+
+        @Override
+        public void onUpdate(HasMetadata oldObj, HasMetadata newObj) {
+            getOwners(newObj).forEach(this::handleEvent);
+        }
+
+        @Override
+        public void onDelete(HasMetadata obj, boolean deletedFinalStateUnknown) {
+            getOwners(obj).forEach(this::handleEvent);
+        }
+
+        Stream<OperatorObjectModel> getOwners(HasMetadata obj) {
+            return primaryCache.list().filter(model -> isControllingOwner(model, obj));
+        }
+
+        boolean isControllingOwner(OperatorObjectModel model, HasMetadata obj) {
+            return obj.getOwnerReferenceFor(model)
+                    .map(OwnerReference::getController)
+                    .map(Boolean.TRUE::equals)
+                    .orElse(false);
+        }
+
+        void handleEvent(OperatorObjectModel model) {
+            getEventHandler()
+                .handleEvent(new ResourceEvent(ResourceAction.UPDATED, ResourceID.fromResource(model), model));
         }
     }
 }

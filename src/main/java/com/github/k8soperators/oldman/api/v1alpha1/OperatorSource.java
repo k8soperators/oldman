@@ -1,19 +1,23 @@
 package com.github.k8soperators.oldman.api.v1alpha1;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import io.fabric8.kubernetes.api.model.ObjectReference;
-import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpec;
-import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceSpec;
-import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpec;
 
 import java.util.List;
 
 @JsonDeserialize(using = com.fasterxml.jackson.databind.JsonDeserializer.None.class)
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonPropertyOrder({ "namespace", "name", "configMaps", "secrets", "operatorGroupSpec", "catalogSourceSpec", "subscriptionSpec" })
+@JsonPropertyOrder({
+        "namespace",
+        "name",
+        "configMaps",
+        "secrets",
+        "operatorGroup",
+        "catalogSource",
+        "subscription",
+        "cleanupResources" })
 public class OperatorSource {
 
     private String namespace;
@@ -24,16 +28,13 @@ public class OperatorSource {
 
     private List<PropagatedSecret> secrets;
 
-    @JsonProperty("operatorGroupSpec")
-    private OperatorGroupSpec operatorGroupSpec;
+    private Subresource.OperatorGroup operatorGroup;
 
-    @JsonProperty("catalogSourceSpec")
-    private CatalogSourceSpec catalogSourceSpec;
+    private Subresource.CatalogSource catalogSource;
 
-    @JsonProperty("subscriptionSpec")
-    private SubscriptionSpec subscriptionSpec;
+    private Subresource.Subscription subscription;
 
-    private List<ObjectReference> removeObjects;
+    private List<ObjectReference> cleanupResources;
 
     public String getNamespace() {
         return namespace;
@@ -67,36 +68,36 @@ public class OperatorSource {
         this.secrets = secrets;
     }
 
-    public OperatorGroupSpec getOperatorGroupSpec() {
-        return operatorGroupSpec;
+    public Subresource.OperatorGroup getOperatorGroup() {
+        return operatorGroup;
     }
 
-    public void setOperatorGroupSpec(OperatorGroupSpec operatorGroupSpec) {
-        this.operatorGroupSpec = operatorGroupSpec;
+    public void setOperatorGroup(Subresource.OperatorGroup operatorGroup) {
+        this.operatorGroup = operatorGroup;
     }
 
-    public CatalogSourceSpec getCatalogSourceSpec() {
-        return catalogSourceSpec;
+    public Subresource.CatalogSource getCatalogSource() {
+        return catalogSource;
     }
 
-    public void setCatalogSourceSpec(CatalogSourceSpec catalogSourceSpec) {
-        this.catalogSourceSpec = catalogSourceSpec;
+    public void setCatalogSource(Subresource.CatalogSource catalogSource) {
+        this.catalogSource = catalogSource;
     }
 
-    public SubscriptionSpec getSubscriptionSpec() {
-        return subscriptionSpec;
+    public Subresource.Subscription getSubscription() {
+        return subscription;
     }
 
-    public void setSubscriptionSpec(SubscriptionSpec subscriptionSpec) {
-        this.subscriptionSpec = subscriptionSpec;
+    public void setSubscription(Subresource.Subscription subscription) {
+        this.subscription = subscription;
     }
 
-    public List<ObjectReference> getRemoveObjects() {
-        return removeObjects;
+    public List<ObjectReference> getCleanupResources() {
+        return cleanupResources;
     }
 
-    public void setRemoveObjects(List<ObjectReference> removeObjects) {
-        this.removeObjects = removeObjects;
+    public void setCleanupResources(List<ObjectReference> removeObjects) {
+        this.cleanupResources = removeObjects;
     }
 
 }
