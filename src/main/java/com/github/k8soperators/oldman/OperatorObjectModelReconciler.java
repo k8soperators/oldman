@@ -78,6 +78,11 @@ import java.util.stream.Stream;
 @ControllerConfiguration
 public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectModel>, Cleaner<OperatorObjectModel>, EventSourceInitializer<OperatorObjectModel> {
 
+    private static final String LABEL_KEY_MANAGED_BY = "app.kubernetes.io/managed-by";
+    private static final String OLDMAN = "oldman";
+    private static final String CONDITION_ERROR = "Error";
+    private static final String CONDITION_READY = "Ready";
+
     private final KubernetesClient client;
 
     @Inject
@@ -105,8 +110,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             OperatorObjectModel model = Serialization.unmarshal(bootstrap.getData().get("model"), OperatorObjectModel.class);
             Optional.ofNullable(model.getMetadata().getLabels())
                 .ifPresentOrElse(
-                        labels -> labels.put("app.kubernetes.io/managed-by", "oldman"),
-                        () -> model.getMetadata().setLabels(Map.of("app.kubernetes.io/managed-by", "oldman")));
+                        labels -> labels.put(LABEL_KEY_MANAGED_BY, OLDMAN),
+                        () -> model.getMetadata().setLabels(Map.of(LABEL_KEY_MANAGED_BY, OLDMAN)));
             client.resources(OperatorObjectModel.class).createOrReplace(model);
         } else {
             log.infof("No bootstrap ConfigMap found.");
@@ -150,20 +155,20 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
          * - Calculate `Ready` condition based on presence of both `Error` or `Installing` conditions
          */
         OperatorObjectModelStatus status = model.getOrCreateStatus();
-        status.getConditions().removeIf(c -> isConditionType(c, "Error", "Installing"));
+        status.getConditions().removeIf(c -> isConditionType(c, CONDITION_ERROR, "Installing"));
 
         model.getSpec().getOperators().forEach(operator -> reconcile(model, operator));
 
-        status.getConditions().stream().filter(c -> "Error".equals(c.getType())).findFirst().ifPresentOrElse(
+        status.getConditions().stream().filter(c -> CONDITION_ERROR.equals(c.getType())).findFirst().ifPresentOrElse(
                 c -> {
-                    Condition readyCondition = status.getOrCreateCondition("Ready");
+                    Condition readyCondition = status.getOrCreateCondition(CONDITION_READY);
                     readyCondition.setStatus("False");
                     readyCondition.setReason("ErrorConditions");
                     readyCondition.setMessage(null);
                     readyCondition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());
                 },
                 () -> {
-                    Condition readyCondition = status.getOrCreateCondition("Ready");
+                    Condition readyCondition = status.getOrCreateCondition(CONDITION_READY);
                     readyCondition.setStatus("True");
                     readyCondition.setReason(null);
                     readyCondition.setMessage(null);
@@ -192,6 +197,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                     if (resource.getMetadata().getDeletionTimestamp() == null) {
                         log.infof("Attempting removal of dependent resource: %s", obj);
                         resourceClient.delete();
+                    } else {
+                        log.debugf("Dependent resource already deleted and pending removal: %s", obj);
                     }
                     return 1;
                 }
@@ -232,7 +239,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                 .orElseGet(NamespaceBuilder::new)
                 .editOrNewMetadata()
                     .withName(operatorNamespace)
-                    .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                    .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                 .endMetadata()
                 .build();
 
@@ -241,10 +248,6 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     }
 
     static void addOwnerReference(HasMetadata owner, HasMetadata resource) {
-        addOwnerReference(owner, resource, null);
-    }
-
-    static void addOwnerReference(HasMetadata owner, HasMetadata resource, Boolean controller) {
         int ownerCount = resource.optionalMetadata()
                 .map(ObjectMeta::getOwnerReferences)
                 .map(Collection::size)
@@ -281,7 +284,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(configuration.getName())
-                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
                         .withData(source.getData())
                         .withBinaryData(source.getBinaryData())
@@ -302,7 +305,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(configuration.getName())
-                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
                         .withType(source.getType())
                         .withData(source.getData())
@@ -329,7 +332,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         if (source == null) {
             if (sourceRequired) {
                 return new ConditionBuilder()
-                        .withType("Error")
+                        .withType(CONDITION_ERROR)
                         .withStatus("True")
                         .withReason("MissingResource")
                         .withMessage(String.format("%s{name=%s} is required", resourceType.getSimpleName(), sourceName))
@@ -388,7 +391,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(name)
-                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                             .addToLabels(subresource.getLabels())
                             .addToAnnotations(subresource.getAnnotations())
                             .removeFromLabels(subresource.getLabelsRemoved())
@@ -413,7 +416,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .editOrNewMetadata()
                             .withNamespace(operator.getNamespace())
                             .withName(name)
-                            .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                            .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                             .addToLabels(subresource.getLabels())
                             .addToAnnotations(subresource.getAnnotations())
                             .removeFromLabels(subresource.getLabelsRemoved())
@@ -447,7 +450,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .editOrNewMetadata()
                                 .withNamespace(operator.getNamespace())
                                 .withName(name)
-                                .addToLabels("app.kubernetes.io/managed-by", "oldman")
+                                .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                                 .addToLabels(subresource.getLabels())
                                 .addToAnnotations(subresource.getAnnotations())
                                 .removeFromLabels(subresource.getLabelsRemoved())
@@ -580,7 +583,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         public void addInformer(Class<? extends HasMetadata> type, KubernetesClient client) {
             addInformer(type, client.resources(type)
                         .inAnyNamespace()
-                        .withLabel("app.kubernetes.io/managed-by", "oldman")
+                        .withLabel(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .inform());
         }
 
