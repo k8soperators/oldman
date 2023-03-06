@@ -17,6 +17,7 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.ObjectReference;
 import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
@@ -159,7 +160,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
         model.getSpec().getOperators().forEach(operator -> reconcile(model, operator));
 
-        status.getConditions().stream().filter(c -> CONDITION_ERROR.equals(c.getType())).findFirst().ifPresentOrElse(
+        status.getConditions().stream().filter(c -> isConditionType(c, CONDITION_ERROR)).findFirst().ifPresentOrElse(
                 c -> {
                     Condition readyCondition = status.getOrCreateCondition(CONDITION_READY);
                     readyCondition.setStatus("False");
@@ -180,39 +181,44 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public DeleteControl cleanup(OperatorObjectModel model, Context<OperatorObjectModel> context) {
-        int remaining = model.getSpec()
+        boolean remaining = model.getSpec()
             .getOperators()
             .stream()
             .map(OperatorSource::getCleanupResources)
             .filter(Objects::nonNull)
             .flatMap(Collection::stream)
-            .mapToInt(obj -> {
-                var resourceClient = client.genericKubernetesResources(obj.getApiVersion(), obj.getKind())
-                        .inNamespace(obj.getNamespace())
-                        .withName(obj.getName());
+            .map(this::cleanupResource)
+            .filter(Boolean.TRUE::equals)
+            .distinct() // ensure all entries processed
+            .findFirst()
+            .orElse(false);
 
-                var resource = resourceClient.get();
-
-                if (resource != null) {
-                    if (resource.getMetadata().getDeletionTimestamp() == null) {
-                        log.infof("Attempting removal of dependent resource: %s", obj);
-                        resourceClient.delete();
-                    } else {
-                        log.debugf("Dependent resource already deleted and pending removal: %s", obj);
-                    }
-                    return 1;
-                }
-
-                return 0;
-            })
-            .sum();
-
-        if (remaining > 0) {
+        if (remaining) {
             return DeleteControl.noFinalizerRemoval()
                 .rescheduleAfter(Duration.ofSeconds(5));
         }
 
         return DeleteControl.defaultDelete();
+    }
+
+    boolean cleanupResource(ObjectReference obj) {
+        var resourceClient = client.genericKubernetesResources(obj.getApiVersion(), obj.getKind())
+                .inNamespace(obj.getNamespace())
+                .withName(obj.getName());
+
+        var resource = resourceClient.get();
+
+        if (resource != null) {
+            if (resource.getMetadata().getDeletionTimestamp() == null) {
+                log.infof("Attempting removal of dependent resource: %s", obj);
+                resourceClient.delete();
+            } else {
+                log.debugf("Dependent resource already deleted and pending removal: %s", obj);
+            }
+            return true;
+        }
+
+        return false;
     }
 
     boolean isCondition(Condition condition, String type, String reason) {
@@ -531,12 +537,12 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             getReferencingObjectModels(obj).forEach(this::handleEvent);
         }
 
-        Stream<ResourceID> getReferencingObjectModels(T obj) {
-            return primaryCache.list().filter(model -> isReferenced(model, obj)).map(ResourceID::fromResource);
+        Stream<OperatorObjectModel> getReferencingObjectModels(T obj) {
+            return primaryCache.list().filter(model -> isReferenced(model, obj));
         }
 
-        void handleEvent(ResourceID modelId) {
-            getEventHandler().handleEvent(new ResourceEvent(ResourceAction.UPDATED, modelId, null));
+        void handleEvent(OperatorObjectModel model) {
+            getEventHandler().handleEvent(new ResourceEvent(ResourceAction.UPDATED, ResourceID.fromResource(model), model));
         }
 
         boolean isReferenced(OperatorObjectModel model, T dataSource) {
