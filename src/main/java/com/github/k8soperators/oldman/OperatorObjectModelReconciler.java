@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModel;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModelStatus;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorSource;
-import com.github.k8soperators.oldman.api.v1alpha1.PropagatedConfigMap;
 import com.github.k8soperators.oldman.api.v1alpha1.PropagatedData;
-import com.github.k8soperators.oldman.api.v1alpha1.PropagatedSecret;
 import com.github.k8soperators.oldman.api.v1alpha1.Subresource;
+import com.github.k8soperators.oldman.events.BootstrapConfigMapEventHandler;
+import com.github.k8soperators.oldman.events.ConfigMapEventSource;
+import com.github.k8soperators.oldman.events.OwnedResourceEventSource;
+import com.github.k8soperators.oldman.events.SecretEventSource;
 import io.fabric8.kubernetes.api.model.Condition;
 import io.fabric8.kubernetes.api.model.ConditionBuilder;
 import io.fabric8.kubernetes.api.model.ConfigMap;
@@ -18,16 +20,11 @@ import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.NamespaceBuilder;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.ObjectReference;
-import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.api.model.SecretBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.fabric8.kubernetes.client.dsl.Resource;
-import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
-import io.fabric8.kubernetes.client.informers.cache.Cache;
-import io.fabric8.kubernetes.client.informers.cache.Store;
 import io.fabric8.kubernetes.client.utils.Serialization;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupBuilder;
@@ -48,16 +45,11 @@ import io.javaoperatorsdk.operator.api.reconciler.EventSourceContext;
 import io.javaoperatorsdk.operator.api.reconciler.EventSourceInitializer;
 import io.javaoperatorsdk.operator.api.reconciler.Reconciler;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
-import io.javaoperatorsdk.operator.processing.event.ResourceID;
-import io.javaoperatorsdk.operator.processing.event.source.AbstractEventSource;
 import io.javaoperatorsdk.operator.processing.event.source.EventSource;
-import io.javaoperatorsdk.operator.processing.event.source.IndexerResourceCache;
-import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceAction;
-import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceEvent;
 import org.jboss.logging.Logger;
 
 import javax.annotation.PostConstruct;
-import javax.enterprise.context.ApplicationScoped;
+import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 
 import java.time.Duration;
@@ -65,22 +57,20 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.BinaryOperator;
-import java.util.function.Function;
 import java.util.stream.Stream;
 
 @ControllerConfiguration
 public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectModel>, Cleaner<OperatorObjectModel>, EventSourceInitializer<OperatorObjectModel> {
 
-    private static final String LABEL_KEY_MANAGED_BY = "app.kubernetes.io/managed-by";
-    private static final String OLDMAN = "oldman";
+    public static final String LABEL_KEY_MANAGED_BY = "app.kubernetes.io/managed-by";
+    public static final String OLDMAN = "oldman";
+
     private static final String CONDITION_ERROR = "Error";
     private static final String CONDITION_READY = "Ready";
 
@@ -89,14 +79,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     @Inject
     Logger log;
 
-    @Inject
-    ConfigMapEventSource configMapEventSource;
-
-    @Inject
-    SecretEventSource secretEventSource;
-
-    @Inject
     OwnedResourceEventSource ownedResources;
+    SharedIndexInformer<ConfigMap> bootstrapInformer;
 
     public OperatorObjectModelReconciler(KubernetesClient client) {
         this.client = client;
@@ -104,32 +88,26 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @PostConstruct
     void initialize() {
-        ConfigMap bootstrap = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName("oldman-bootstrap").get();
+        bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName("oldman-bootstrap").inform();
+        bootstrapInformer.addEventHandler(new BootstrapConfigMapEventHandler(client));
+    }
 
-        if (bootstrap != null) {
-            log.infof("Found bootstrap ConfigMap", bootstrap);
-            OperatorObjectModel model = Serialization.unmarshal(bootstrap.getData().get("model"), OperatorObjectModel.class);
-            Optional.ofNullable(model.getMetadata().getLabels())
-                .ifPresentOrElse(
-                        labels -> labels.put(LABEL_KEY_MANAGED_BY, OLDMAN),
-                        () -> model.getMetadata().setLabels(Map.of(LABEL_KEY_MANAGED_BY, OLDMAN)));
-            client.resources(OperatorObjectModel.class).createOrReplace(model);
-        } else {
-            log.infof("No bootstrap ConfigMap found.");
-        }
+    @PreDestroy
+    void shutdown() {
+        bootstrapInformer.close();
     }
 
     @Override
     public Map<String, EventSource> prepareEventSources(EventSourceContext<OperatorObjectModel> context) {
-        configMapEventSource.setPrimaryCache(context.getPrimaryCache());
+        ConfigMapEventSource configMapEventSource = new ConfigMapEventSource(context.getPrimaryCache());
         SharedIndexInformer<ConfigMap> configMapInformer = client.configMaps().inNamespace(client.getNamespace()).inform();
         configMapInformer.addEventHandler(configMapEventSource);
 
-        secretEventSource.setPrimaryCache(context.getPrimaryCache());
+        SecretEventSource secretEventSource = new SecretEventSource(context.getPrimaryCache());
         SharedIndexInformer<Secret> secretInformer = client.secrets().inNamespace(client.getNamespace()).inform();
         secretInformer.addEventHandler(secretEventSource);
 
-        ownedResources.setPrimaryCache(context.getPrimaryCache());
+        ownedResources = new OwnedResourceEventSource(context.getPrimaryCache());
         ownedResources.addInformer(Namespace.class, client);
         ownedResources.addInformer(ConfigMap.class, client);
         ownedResources.addInformer(Secret.class, client);
@@ -149,7 +127,6 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
          * To-Do List:
          *
          * - Validate the model
-         * - Informers for sub-resources
          * - Delete flag for each sub-resource specified in model
          * - Allow labels/annotations on namespaces, configmaps, secrets, and OLM resources in model
          * - Calculate `Installing` conditions based on their status
@@ -238,9 +215,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     void reconcileNamespace(OperatorObjectModel model, OperatorSource operator) {
         String operatorNamespace = operator.getNamespace();
-        Resource<Namespace> resource = client.resources(Namespace.class).withName(operatorNamespace);
 
-        Namespace namespace = Optional.ofNullable(ownedResources.get(Namespace.class, operatorNamespace) )
+        Namespace namespace = Optional.ofNullable(ownedResources.get(Namespace.class, operatorNamespace))
                 .map(NamespaceBuilder::new)
                 .orElseGet(NamespaceBuilder::new)
                 .editOrNewMetadata()
@@ -250,7 +226,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                 .build();
 
         addOwnerReference(model, namespace);
-        resource.createOrReplace(namespace);
+        client.resource(namespace).createOrReplace();
     }
 
     static void addOwnerReference(HasMetadata owner, HasMetadata resource) {
@@ -354,20 +330,17 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         addOwnerReference(model, desired);
 
         String name = configuration.getName();
-        Resource<T> targetResource = client.resources(resourceType)
-                .inNamespace(targetNamespace)
-                .withName(name);
 
         if (current != null) {
             if (Objects.equals(current, desired)) {
                 log.tracef("%s{namespace=%s, name=%s}: unchanged", resourceType.getSimpleName(), targetNamespace, name);
             } else {
                 logChanged(current, desired);
-                targetResource.replace(desired);
+                client.resource(desired).replace();
             }
         } else {
             log.debugf("%s{namespace=%s, name=%s}: created", resourceType.getSimpleName(), targetNamespace, name);
-            targetResource.create(desired);
+            client.resource(desired).create();
         }
 
         return null;
@@ -485,20 +458,16 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
         addOwnerReference(model, desired);
 
-        Resource<T> targetResource = client.resources(resourceType)
-                .inNamespace(targetNamespace)
-                .withName(name);
-
         if (current != null) {
             if (hasDesiredState.test(current, desired)) {
                 log.tracef("%s{namespace=%s, name=%s}: unchanged", resourceType.getSimpleName(), targetNamespace, name);
             } else {
                 logChanged(current, desired);
-                targetResource.replace(desired);
+                client.resource(desired).replace();
             }
         } else {
             log.debugf("%s{namespace=%s, name=%s}: created", resourceType.getSimpleName(), targetNamespace, name);
-            targetResource.create(desired);
+            client.resource(desired).create();
         }
     }
 
@@ -512,138 +481,6 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             JsonNode desiredJson = objectMapper.convertValue(desired, JsonNode.class);
             JsonNode patch = JsonDiff.asJson(currentJson, desiredJson);
             log.debugf("%s{namespace=%s, name=%s}: changed =>\n%s", kind, name, namespace, patch.toPrettyString());
-        }
-    }
-
-    abstract static class ConfigurationEventSource<T extends HasMetadata, P extends PropagatedData> extends AbstractEventSource implements ResourceEventHandler<T> {
-        IndexerResourceCache<OperatorObjectModel> primaryCache;
-
-        public void setPrimaryCache(IndexerResourceCache<OperatorObjectModel> primaryCache) {
-            this.primaryCache = primaryCache;
-        }
-
-        @Override
-        public void onAdd(T obj) {
-            getReferencingObjectModels(obj).forEach(this::handleEvent);
-        }
-
-        @Override
-        public void onUpdate(T oldObj, T newObj) {
-            getReferencingObjectModels(newObj).forEach(this::handleEvent);
-        }
-
-        @Override
-        public void onDelete(T obj, boolean deletedFinalStateUnknown) {
-            getReferencingObjectModels(obj).forEach(this::handleEvent);
-        }
-
-        Stream<OperatorObjectModel> getReferencingObjectModels(T obj) {
-            return primaryCache.list().filter(model -> isReferenced(model, obj));
-        }
-
-        void handleEvent(OperatorObjectModel model) {
-            getEventHandler().handleEvent(new ResourceEvent(ResourceAction.UPDATED, ResourceID.fromResource(model), model));
-        }
-
-        boolean isReferenced(OperatorObjectModel model, T dataSource) {
-            return model.getSpec()
-                    .getOperators()
-                    .stream()
-                    .map(getDataSource())
-                    .filter(Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .map(PropagatedData::getSourceName)
-                    .map(name -> dataSource.getMetadata().getName().equals(name))
-                    .findFirst()
-                    .orElse(false);
-        }
-
-        abstract Function<OperatorSource, List<P>> getDataSource();
-    }
-
-    @ApplicationScoped
-    public static class ConfigMapEventSource extends ConfigurationEventSource<ConfigMap, PropagatedConfigMap> {
-        @Override
-        Function<OperatorSource, List<PropagatedConfigMap>> getDataSource() {
-            return OperatorSource::getConfigMaps;
-        }
-    }
-
-    @ApplicationScoped
-    public static class SecretEventSource extends ConfigurationEventSource<Secret, PropagatedSecret> {
-        @Override
-        Function<OperatorSource, List<PropagatedSecret>> getDataSource() {
-            return OperatorSource::getSecrets;
-        }
-    }
-
-    @ApplicationScoped
-    public static class OwnedResourceEventSource extends AbstractEventSource implements ResourceEventHandler<HasMetadata> {
-        IndexerResourceCache<OperatorObjectModel> primaryCache;
-        Map<Class<? extends HasMetadata>, SharedIndexInformer<? extends HasMetadata>> informers = new HashMap<>();
-
-        public void setPrimaryCache(IndexerResourceCache<OperatorObjectModel> primaryCache) {
-            this.primaryCache = primaryCache;
-        }
-
-        public void addInformer(Class<? extends HasMetadata> type, KubernetesClient client) {
-            addInformer(type, client.resources(type)
-                        .inAnyNamespace()
-                        .withLabel(LABEL_KEY_MANAGED_BY, OLDMAN)
-                        .inform());
-        }
-
-        public void addInformer(Class<? extends HasMetadata> type, SharedIndexInformer<? extends HasMetadata> informer) {
-            informer.addEventHandler(this);
-            informers.put(type, informer);
-        }
-
-        @SuppressWarnings("unchecked")
-        public <T extends HasMetadata> SharedIndexInformer<T> getInformer(Class<T> type) {
-            return (SharedIndexInformer<T>) informers.get(type);
-        }
-
-        public <T extends HasMetadata> Store<T> getStore(Class<T> type) {
-            return getInformer(type).getStore();
-        }
-
-        public <T extends HasMetadata> T get(Class<T> type, String key) {
-            return getInformer(type).getStore().getByKey(key);
-        }
-
-        public <T extends HasMetadata> T get(Class<T> type, String namespace, String name) {
-            return get(type, Cache.namespaceKeyFunc(namespace, name));
-        }
-
-        @Override
-        public void onAdd(HasMetadata obj) {
-            getOwners(obj).forEach(this::handleEvent);
-        }
-
-        @Override
-        public void onUpdate(HasMetadata oldObj, HasMetadata newObj) {
-            getOwners(newObj).forEach(this::handleEvent);
-        }
-
-        @Override
-        public void onDelete(HasMetadata obj, boolean deletedFinalStateUnknown) {
-            getOwners(obj).forEach(this::handleEvent);
-        }
-
-        Stream<OperatorObjectModel> getOwners(HasMetadata obj) {
-            return primaryCache.list().filter(model -> isControllingOwner(model, obj));
-        }
-
-        boolean isControllingOwner(OperatorObjectModel model, HasMetadata obj) {
-            return obj.getOwnerReferenceFor(model)
-                    .map(OwnerReference::getController)
-                    .map(Boolean.TRUE::equals)
-                    .orElse(false);
-        }
-
-        void handleEvent(OperatorObjectModel model) {
-            getEventHandler()
-                .handleEvent(new ResourceEvent(ResourceAction.UPDATED, ResourceID.fromResource(model), model));
         }
     }
 }
