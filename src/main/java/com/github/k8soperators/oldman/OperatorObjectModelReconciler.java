@@ -46,6 +46,7 @@ import io.javaoperatorsdk.operator.api.reconciler.EventSourceInitializer;
 import io.javaoperatorsdk.operator.api.reconciler.Reconciler;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
 import io.javaoperatorsdk.operator.processing.event.source.EventSource;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import javax.annotation.PostConstruct;
@@ -57,12 +58,15 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.BinaryOperator;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 @ControllerConfiguration
@@ -79,6 +83,10 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     @Inject
     Logger log;
 
+    @Inject
+    @ConfigProperty(name = "oldman.bootstrap-configmap-name", defaultValue = "oldman-bootstrap")
+    String bootstrapConfigMapName;
+
     OwnedResourceEventSource ownedResources;
     SharedIndexInformer<ConfigMap> bootstrapInformer;
 
@@ -88,7 +96,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @PostConstruct
     void initialize() {
-        bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName("oldman-bootstrap").inform();
+        bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName(bootstrapConfigMapName).inform();
         bootstrapInformer.addEventHandler(new BootstrapConfigMapEventHandler(client));
     }
 
@@ -268,8 +276,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .withName(configuration.getName())
                             .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
-                        .withData(source.getData())
-                        .withBinaryData(source.getBinaryData())
+                        .withData(reconcileDataMap(configuration, source, target, ConfigMap::getData))
+                        .withBinaryData(reconcileDataMap(configuration, source, target, ConfigMap::getBinaryData))
                         .build()))
             .filter(Objects::nonNull)
             .forEach(model.getStatus().getConditions()::add);
@@ -289,47 +297,69 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .withName(configuration.getName())
                             .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
-                        .withType(source.getType())
-                        .withData(source.getData())
-                        .withStringData(source.getStringData())
+                        .withType(Optional.ofNullable(configuration.getType()).orElseGet(source::getType))
+                        .withData(reconcileDataMap(configuration, source, target, Secret::getData))
+                        .withStringData(reconcileDataMap(configuration, source, target, Secret::getStringData))
                         .build()))
             .filter(Objects::nonNull)
             .forEach(model.getStatus().getConditions()::add);
     }
 
+    static <T> Map<String, String> reconcileDataMap(PropagatedData<T> configuration,
+            T source,
+            T target,
+            Function<T, Map<String, String>> accessor) {
+
+        final Map<String, String> data = Optional.ofNullable(target).map(accessor).orElseGet(HashMap::new);
+        final Map<String, String> sourceData = Optional.ofNullable(source).map(accessor).orElseGet(Collections::emptyMap);
+
+        final String sourceKey = configuration.getSourceKey();
+        final String key = configuration.getKey();
+
+        if (key != null) {
+            if (configuration.isRemoved()) {
+                data.remove(key);
+            } else {
+                data.put(key, sourceData.get(sourceKey));
+            }
+        } else {
+            data.putAll(sourceData);
+        }
+
+        return data;
+    }
+
     <T extends HasMetadata> Condition reconcile(OperatorObjectModel model,
-            PropagatedData configuration,
+            PropagatedData<T> configuration,
             Class<T> resourceType,
             String targetNamespace,
             BinaryOperator<T> updater) {
 
         String sourceName = configuration.getSourceName();
-        boolean sourceRequired = Boolean.FALSE.equals(configuration.isSourceOptional());
 
-        T source =  client.resources(resourceType)
+        T source = client.resources(resourceType)
                 .inNamespace(client.getNamespace())
                 .withName(sourceName)
                 .get();
 
-        if (source == null) {
-            if (sourceRequired) {
-                return new ConditionBuilder()
-                        .withType(CONDITION_ERROR)
-                        .withStatus("True")
-                        .withReason("MissingResource")
-                        .withMessage(String.format("%s{name=%s} is required", resourceType.getSimpleName(), sourceName))
-                        .withLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString())
-                        .build();
-            }
+        if (!configuration.isRemoved() && configuration.isSourceMissing(source)) {
+            return handleMissingDataSource(configuration, resourceType);
+        }
 
+        String name = configuration.getName();
+        T current = ownedResources.get(resourceType, targetNamespace, name);
+
+        if (configuration.isRemoved() && configuration.getKey() == null) {
+            // Configuration says to remove the entire resource
+            if (current != null) {
+                var details = client.resource(current).delete();
+                log.debugf("%s{namespace=%s, name=%s}: deleted. Details: %s", resourceType.getSimpleName(), targetNamespace, name, details);
+            }
             return null;
         }
 
-        T current = ownedResources.get(resourceType, targetNamespace, configuration.getName());
         T desired = updater.apply(source, current);
         addOwnerReference(model, desired);
-
-        String name = configuration.getName();
 
         if (current != null) {
             if (Objects.equals(current, desired)) {
@@ -341,6 +371,29 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         } else {
             log.debugf("%s{namespace=%s, name=%s}: created", resourceType.getSimpleName(), targetNamespace, name);
             client.resource(desired).create();
+        }
+
+        return null;
+    }
+
+    Condition handleMissingDataSource(PropagatedData<?> configuration, Class<?> resourceType) {
+        if (!configuration.isSourceOptional()) {
+            String sourceName = configuration.getSourceName();
+            String message;
+
+            if (configuration.getSourceKey() != null) {
+                message = String.format("%s{name=%s, key=%s} is required", resourceType.getSimpleName(), sourceName, configuration.getSourceKey());
+            } else {
+                message = String.format("%s{name=%s} is required", resourceType.getSimpleName(), sourceName);
+            }
+
+            return new ConditionBuilder()
+                    .withType(CONDITION_ERROR)
+                    .withStatus("True")
+                    .withReason("MissingResource")
+                    .withMessage(message)
+                    .withLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString())
+                    .build();
         }
 
         return null;

@@ -17,7 +17,7 @@ import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Stream;
 
-abstract class ConfigurationEventSource<T extends HasMetadata, P extends PropagatedData> extends AbstractEventSource implements ResourceEventHandler<T> {
+abstract class ConfigurationEventSource<T extends HasMetadata, P extends PropagatedData<T>> extends AbstractEventSource implements ResourceEventHandler<T> {
     protected final IndexerResourceCache<OperatorObjectModel> primaryCache;
 
     protected ConfigurationEventSource(IndexerResourceCache<OperatorObjectModel> primaryCache) {

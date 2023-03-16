@@ -4,17 +4,19 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapKeySelector;
 
 @JsonDeserialize(using = com.fasterxml.jackson.databind.JsonDeserializer.None.class)
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonPropertyOrder({ "namespace", "name", "key", "source" })
-public class PropagatedConfigMap implements PropagatedData {
+@JsonPropertyOrder({ "name", "key", "removed", "source" })
+public class PropagatedConfigMap implements PropagatedData<ConfigMap> {
 
     ConfigMapKeySelector source;
 
     String name;
     String key;
+    boolean removed;
 
     public ConfigMapKeySelector getSource() {
         return source;
@@ -27,21 +29,38 @@ public class PropagatedConfigMap implements PropagatedData {
     @Override
     @JsonIgnore
     public String getSourceName() {
-        return source.getName();
+        return source == null ? null : source.getName();
     }
 
     @Override
     @JsonIgnore
     public String getSourceKey() {
-        return source.getKey();
+        return source == null ? null : source.getKey();
+    }
+
+    @Override
+    @JsonIgnore
+    public boolean isSourceMissing(ConfigMap configMap) {
+        if (configMap == null) {
+            return true;
+        }
+
+        String sourceKey = getSourceKey();
+
+        if (sourceKey == null) {
+            return false;
+        }
+
+        return !hasKey(configMap.getData(), sourceKey) && !hasKey(configMap.getBinaryData(), sourceKey);
     }
 
     @Override
     @JsonIgnore
     public boolean isSourceOptional() {
-        return Boolean.TRUE.equals(source.getOptional());
+        return source == null || Boolean.TRUE.equals(source.getOptional());
     }
 
+    @Override
     public String getName() {
         return name;
     }
@@ -50,6 +69,7 @@ public class PropagatedConfigMap implements PropagatedData {
         this.name = name;
     }
 
+    @Override
     public String getKey() {
         return key;
     }
@@ -58,4 +78,12 @@ public class PropagatedConfigMap implements PropagatedData {
         this.key = key;
     }
 
+    @Override
+    public boolean isRemoved() {
+        return removed;
+    }
+
+    public void setRemoved(boolean removed) {
+        this.removed = removed;
+    }
 }

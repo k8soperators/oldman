@@ -42,11 +42,20 @@ public class BootstrapConfigMapEventHandler implements ResourceEventHandler<Conf
     }
 
     OperatorObjectModel toModel(ConfigMap bootstrap) {
-        OperatorObjectModel model = Serialization.unmarshal(bootstrap.getData().get("model"), OperatorObjectModel.class);
+        String serializedModel = bootstrap.getData().get("model");
+        OperatorObjectModel model = Serialization.unmarshal(serializedModel, OperatorObjectModel.class);
+
         Optional.ofNullable(model.getMetadata().getLabels())
-            .ifPresentOrElse(
-                    labels -> labels.put(LABEL_KEY_MANAGED_BY, OLDMAN),
-                    () -> model.getMetadata().setLabels(Map.of(LABEL_KEY_MANAGED_BY, OLDMAN)));
+            .ifPresentOrElse(this::addManagedByLabel, () -> initializeLabels(model));
+
         return model;
+    }
+
+    void addManagedByLabel(Map<String, String> labels) {
+        labels.put(LABEL_KEY_MANAGED_BY, OLDMAN);
+    }
+
+    void initializeLabels(OperatorObjectModel model) {
+        model.getMetadata().setLabels(Map.of(LABEL_KEY_MANAGED_BY, OLDMAN));
     }
 }
