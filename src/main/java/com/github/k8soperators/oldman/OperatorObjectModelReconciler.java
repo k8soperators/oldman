@@ -29,6 +29,7 @@ import io.fabric8.kubernetes.client.utils.Serialization;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpec;
+import io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroupSpecBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceSpec;
@@ -67,6 +68,7 @@ import java.util.function.BiFunction;
 import java.util.function.BiPredicate;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 @ControllerConfiguration
@@ -276,8 +278,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .withName(configuration.getName())
                             .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
-                        .withData(reconcileDataMap(configuration, source, target, ConfigMap::getData))
-                        .withBinaryData(reconcileDataMap(configuration, source, target, ConfigMap::getBinaryData))
+                        .withData(reconcileDataMap(configuration, source, target, ConfigMap::getData, ConfigMap::getBinaryData))
+                        .withBinaryData(reconcileDataMap(configuration, source, target, ConfigMap::getBinaryData, ConfigMap::getData))
                         .build()))
             .filter(Objects::nonNull)
             .forEach(model.getStatus().getConditions()::add);
@@ -298,8 +300,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .addToLabels(LABEL_KEY_MANAGED_BY, OLDMAN)
                         .endMetadata()
                         .withType(Optional.ofNullable(configuration.getType()).orElseGet(source::getType))
-                        .withData(reconcileDataMap(configuration, source, target, Secret::getData))
-                        .withStringData(reconcileDataMap(configuration, source, target, Secret::getStringData))
+                        .withData(reconcileDataMap(configuration, source, target, Secret::getData, Secret::getStringData))
+                        .withStringData(reconcileDataMap(configuration, source, target, Secret::getStringData, Secret::getData))
                         .build()))
             .filter(Objects::nonNull)
             .forEach(model.getStatus().getConditions()::add);
@@ -308,10 +310,15 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     static <T> Map<String, String> reconcileDataMap(PropagatedData<T> configuration,
             T source,
             T target,
-            Function<T, Map<String, String>> accessor) {
+            Function<T, Map<String, String>> accessor,
+            Function<T, Map<String, String>> alternateAccessor) {
 
-        final Map<String, String> data = Optional.ofNullable(target).map(accessor).orElseGet(HashMap::new);
         final Map<String, String> sourceData = Optional.ofNullable(source).map(accessor).orElseGet(Collections::emptyMap);
+        final Map<String, String> altSourceData = Optional.ofNullable(source).map(alternateAccessor).orElseGet(Collections::emptyMap);
+        final Map<String, String> data = Optional.ofNullable(target)
+                .map(accessor)
+                .map(HashMap::new)
+                .orElseGet(HashMap::new);
 
         final String sourceKey = configuration.getSourceKey();
         final String key = configuration.getKey();
@@ -320,7 +327,9 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             if (configuration.isRemoved()) {
                 data.remove(key);
             } else {
-                data.put(key, sourceData.get(sourceKey));
+                if (sourceData.containsKey(sourceKey) && !altSourceData.containsKey(sourceKey)) {
+                    data.put(key, sourceData.get(sourceKey));
+                }
             }
         } else {
             data.putAll(sourceData);
@@ -411,11 +420,9 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         }
     }
 
-    void reconcileCatalogSource(OperatorObjectModel model, OperatorSource operator, Subresource<CatalogSourceSpec> subresource) {
+    void reconcileCatalogSource(OperatorObjectModel model, OperatorSource operator, Subresource<CatalogSource, CatalogSourceSpec> subresource) {
         reconcile(model, operator, CatalogSource.class, operator.getName() + "-catalog",
-                (existing, desired) ->
-                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
-                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                subresource::hasDesiredState,
                 (name, existing) ->
                     Optional.ofNullable(existing)
                         .map(CatalogSourceBuilder::new)
@@ -433,14 +440,17 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         .build());
     }
 
-    void reconcileOperatorGroup(OperatorObjectModel model, OperatorSource operator, Subresource<OperatorGroupSpec> operatorGroup) {
-        Subresource<OperatorGroupSpec> subresource =
-                Optional.ofNullable(operatorGroup).orElseGet(Subresource::new);
+    void reconcileOperatorGroup(OperatorObjectModel model, OperatorSource operator, Subresource<OperatorGroup, OperatorGroupSpec> operatorGroup) {
+        Subresource<OperatorGroup, OperatorGroupSpec> subresource =
+                Optional.ofNullable(operatorGroup).orElseGet(() -> Subresource.newInstance("OperatorGroup"));
+
+        UnaryOperator<OperatorGroupSpecBuilder> ensureUpgradeStrategy = builder -> {
+            builder.getAdditionalProperties().computeIfAbsent("upgradeStrategy", key -> "Default");
+            return builder;
+        };
 
         reconcile(model, operator, OperatorGroup.class, operator.getNamespace() + "-group",
-                (existing, desired) ->
-                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
-                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                subresource::hasDesiredState,
                 (name, existing) ->
                     Optional.ofNullable(existing)
                         .map(OperatorGroupBuilder::new)
@@ -454,17 +464,18 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                             .removeFromLabels(subresource.getLabelsRemoved())
                             .removeFromAnnotations(subresource.getAnnotationsRemoved())
                         .endMetadata()
-                        .withSpec(Optional.of(subresource)
-                                .map(Subresource::getSpec)
-                                .orElseGet(OperatorGroupSpec::new))
+                        .withSpec(
+                                ensureUpgradeStrategy.apply(Optional.of(subresource)
+                                        .map(Subresource::getSpec)
+                                        .map(OperatorGroupSpecBuilder::new)
+                                        .orElseGet(OperatorGroupSpecBuilder::new))
+                                    .build())
                         .build());
     }
 
-    void reconcileSubscription(OperatorObjectModel model, OperatorSource operator, Subresource<SubscriptionSpec> subresource) {
+    void reconcileSubscription(OperatorObjectModel model, OperatorSource operator, Subresource<Subscription, SubscriptionSpec> subresource) {
         reconcile(model, operator, Subscription.class, operator.getName() + "-subscription",
-                (existing, desired) ->
-                    Objects.equals(existing.getMetadata(), desired.getMetadata()) &&
-                            Objects.equals(existing.getSpec(), desired.getSpec()),
+                subresource::hasDesiredState,
                 (name, existing) -> {
                     var subscriptionSpec = new SubscriptionSpecBuilder(subresource.getSpec());
 

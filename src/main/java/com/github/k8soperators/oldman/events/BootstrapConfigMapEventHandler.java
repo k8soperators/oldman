@@ -3,6 +3,7 @@ package com.github.k8soperators.oldman.events;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModel;
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.utils.Serialization;
 import org.jboss.logging.Logger;
@@ -36,9 +37,24 @@ public class BootstrapConfigMapEventHandler implements ResourceEventHandler<Conf
     }
 
     @Override
-    public void onDelete(ConfigMap bootstrap, boolean deletedFinalStateUnknown) {
+    public void onDelete(ConfigMap deletedBootstrap, boolean deletedFinalStateUnknown) {
         // Do nothing, leaving any previously-created bootstrap CR in place
-        log.infof("Bootstrap ConfigMap deleted", bootstrap);
+        log.infof("Bootstrap ConfigMap deleted", deletedBootstrap);
+
+        try {
+            client.resource(toModel(deletedBootstrap))
+                .edit(model -> {
+                    Optional.ofNullable(model.getMetadata().getLabels())
+                        .filter(labels -> OLDMAN.equals(labels.get(LABEL_KEY_MANAGED_BY)))
+                        .ifPresent(labels -> labels.remove(LABEL_KEY_MANAGED_BY));
+
+                    return model;
+                });
+        } catch (KubernetesClientException e) {
+            if (e.getCode() != 404) {
+                throw e;
+            }
+        }
     }
 
     OperatorObjectModel toModel(ConfigMap bootstrap) {

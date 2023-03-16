@@ -14,12 +14,16 @@ import io.javaoperatorsdk.operator.processing.event.source.AbstractEventSource;
 import io.javaoperatorsdk.operator.processing.event.source.IndexerResourceCache;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceAction;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceEvent;
+import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.stream.Stream;
 
 public class OwnedResourceEventSource extends AbstractEventSource implements ResourceEventHandler<HasMetadata> {
+
+    private static final Logger log = Logger.getLogger(OwnedResourceEventSource.class);
+
     final IndexerResourceCache<OperatorObjectModel> primaryCache;
     final Map<Class<? extends HasMetadata>, SharedIndexInformer<? extends HasMetadata>> informers = new HashMap<>();
 
@@ -58,16 +62,19 @@ public class OwnedResourceEventSource extends AbstractEventSource implements Res
 
     @Override
     public void onAdd(HasMetadata obj) {
+        log.debugf("%s{namespace=%s, name=%s}: added", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
         getOwners(obj).forEach(this::handleEvent);
     }
 
     @Override
-    public void onUpdate(HasMetadata oldObj, HasMetadata newObj) {
-        getOwners(newObj).forEach(this::handleEvent);
+    public void onUpdate(HasMetadata oldObj, HasMetadata obj) {
+        log.debugf("%s{namespace=%s, name=%s}: updated", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+        getOwners(obj).forEach(this::handleEvent);
     }
 
     @Override
     public void onDelete(HasMetadata obj, boolean deletedFinalStateUnknown) {
+        log.debugf("%s{namespace=%s, name=%s}: deleted", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
         getOwners(obj).forEach(this::handleEvent);
     }
 
