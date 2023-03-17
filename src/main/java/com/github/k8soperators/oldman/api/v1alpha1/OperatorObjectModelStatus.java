@@ -50,7 +50,7 @@ public class OperatorObjectModelStatus extends ObservedGenerationAwareStatus {
 
         condition.setStatus(status);
         condition.setReason(reason);
-        condition.setMessage(null);
+        condition.setMessage(message);
 
         if (hasTransitioned) {
             condition.setLastTransitionTime(ZonedDateTime.now(ZoneOffset.UTC).toString());

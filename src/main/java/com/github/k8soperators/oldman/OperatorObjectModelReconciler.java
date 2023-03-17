@@ -179,8 +179,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             .sorted((c1, c2) -> c1.getType().compareTo(c2.getType())) // Error before InProgress
             .findFirst()
             .ifPresentOrElse(
-                    c -> status.updateCondition(CONDITION_READY, STATUS_FALSE, "Has" + c.getType(), null),
-                    () -> status.updateCondition(CONDITION_READY, STATUS_TRUE, null, null));
+                    c -> status.updateCondition(CONDITION_READY, STATUS_FALSE, c.getType(), null),
+                    () -> status.updateCondition(CONDITION_READY, STATUS_TRUE, "Succeeded", "Operators are installed with no errors detected"));
 
         initializeConditionIfMissing(status, CONDITION_ERROR);
         initializeConditionIfMissing(status, CONDITION_INPROGRESS);
@@ -322,7 +322,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                                     .withStringData(reconcileDataMap(configuration, source, target, Secret::getStringData, Secret::getData))
                                     .build()))
             .filter(Objects::nonNull)
-            .forEach(model.getStatus().getConditions()::add);
+            .forEach(model.getStatus()::mergeCondition);
     }
 
     static <T> Map<String, String> reconcileDataMap(PropagatedData<T> configuration,
@@ -574,6 +574,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                         switch (csvStatus.getPhase()) {
                         case "Succeeded":
                             break;
+
                         case "Pending":
                         case "InstallReady":
                         case "Installing":
@@ -589,6 +590,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                                             csvStatus.getMessage()))
                                     .build());
                             break;
+
                         default:
                             model.getStatus().mergeCondition(new ConditionBuilder()
                                     .withType(CONDITION_ERROR)

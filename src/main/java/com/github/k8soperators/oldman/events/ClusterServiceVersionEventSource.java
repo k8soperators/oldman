@@ -55,32 +55,42 @@ public class ClusterServiceVersionEventSource extends AbstractEventSource implem
 
     @Override
     public void onAdd(ClusterServiceVersion obj) {
-        log.debugf("%s{namespace=%s, name=%s}: added", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
-        getOwners(obj).forEach(this::handleEvent);
+        if (isNamespaceOwned(obj)) {
+            log.debugf("%s{namespace=%s, name=%s}: added", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+            getOwners(obj).forEach(this::handleEvent);
+        } else {
+            log.tracef("%s{namespace=%s, name=%s}: added", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+        }
     }
 
     @Override
     public void onUpdate(ClusterServiceVersion oldObj, ClusterServiceVersion obj) {
-        log.debugf("%s{namespace=%s, name=%s}: updated", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
-        getOwners(obj).forEach(this::handleEvent);
+        if (isNamespaceOwned(obj)) {
+            log.debugf("%s{namespace=%s, name=%s}: updated", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+            getOwners(obj).forEach(this::handleEvent);
+        } else {
+            log.tracef("%s{namespace=%s, name=%s}: updated", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+        }
     }
 
     @Override
     public void onDelete(ClusterServiceVersion obj, boolean deletedFinalStateUnknown) {
-        log.debugf("%s{namespace=%s, name=%s}: deleted", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
-        getOwners(obj).forEach(this::handleEvent);
+        if (isNamespaceOwned(obj)) {
+            log.debugf("%s{namespace=%s, name=%s}: deleted", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+            getOwners(obj).forEach(this::handleEvent);
+        } else {
+            log.tracef("%s{namespace=%s, name=%s}: deleted", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+        }
+    }
+
+    boolean isNamespaceOwned(ClusterServiceVersion obj) {
+        return ownedResources.get(Namespace.class, obj.getMetadata().getNamespace()) != null;
     }
 
     Stream<OperatorObjectModel> getOwners(ClusterServiceVersion obj) {
-        Namespace namespace = ownedResources.get(Namespace.class, obj.getMetadata().getNamespace());
-
-        if (namespace == null) {
-            return Stream.empty();
-        }
-
         return ownedResources.getInformer(Subscription.class)
             .getIndexer()
-            .byIndex(Cache.NAMESPACE_INDEX, namespace.getMetadata().getName())
+            .byIndex(Cache.NAMESPACE_INDEX, obj.getMetadata().getName())
             .stream()
             .filter(sub -> Objects.nonNull(sub.getStatus()))
             .filter(sub -> Objects.equals(obj.getMetadata().getName(), sub.getStatus().getInstalledCSV()))
