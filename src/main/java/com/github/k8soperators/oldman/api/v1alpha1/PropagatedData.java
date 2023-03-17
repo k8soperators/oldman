@@ -18,6 +18,8 @@ public interface PropagatedData<T> {
 
     boolean isRemoved();
 
+    Class<T> getGenericType();
+
     default boolean hasKey(Map<String, ?> data, String key) {
         return data != null && data.containsKey(key);
     }

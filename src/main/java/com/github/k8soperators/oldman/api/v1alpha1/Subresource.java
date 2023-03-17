@@ -22,6 +22,15 @@ public abstract class Subresource<K extends HasMetadata, S> {
     private S spec;
 
     @JsonIgnore
+    public abstract Class<K> getKindType();
+
+    @JsonIgnore
+    @SuppressWarnings("unchecked")
+    public Class<S> getSpecType() {
+        return (Class<S>) spec.getClass();
+    }
+
+    @JsonIgnore
     protected abstract S getSpec(K resource);
 
     @JsonIgnore
@@ -75,6 +84,11 @@ public abstract class Subresource<K extends HasMetadata, S> {
         return getPairs(MetadataPairs::getAnnotationsRemoved);
     }
 
+    @JsonIgnore
+    public String name(OperatorSource operator) {
+        return name(getKindType().getSimpleName(), operator);
+    }
+
     public MetadataPairs getMetadata() {
         return metadata;
     }
@@ -95,6 +109,11 @@ public abstract class Subresource<K extends HasMetadata, S> {
         static final String KIND = "CatalogSource";
 
         @Override
+        public Class<io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource> getKindType() {
+            return io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource.class;
+        }
+
+        @Override
         protected CatalogSourceSpec getSpec(io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource resource) {
             return resource.getSpec();
         }
@@ -104,6 +123,11 @@ public abstract class Subresource<K extends HasMetadata, S> {
         static final String KIND = "OperatorGroup";
 
         @Override
+        public Class<io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup> getKindType() {
+            return io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup.class;
+        }
+
+        @Override
         protected OperatorGroupSpec getSpec(io.fabric8.openshift.api.model.operatorhub.v1.OperatorGroup resource) {
             return resource.getSpec();
         }
@@ -111,6 +135,11 @@ public abstract class Subresource<K extends HasMetadata, S> {
 
     static class Subscription extends Subresource<io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription, SubscriptionSpec> {
         static final String KIND = "Subscription";
+
+        @Override
+        public Class<io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription> getKindType() {
+            return io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription.class;
+        }
 
         @Override
         protected SubscriptionSpec getSpec(io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription resource) {
@@ -127,6 +156,23 @@ public abstract class Subresource<K extends HasMetadata, S> {
             return (Subresource<K, S>) new OperatorGroup();
         case Subscription.KIND:
             return (Subresource<K, S>) new Subscription();
+        default:
+            throw new IllegalArgumentException(String.valueOf(kind));
+        }
+    }
+
+    public static String name(Class<?> kindType, OperatorSource operator) {
+        return name(kindType.getSimpleName(), operator);
+    }
+
+    public static String name(String kind, OperatorSource operator) {
+        switch (kind) {
+        case CatalogSource.KIND:
+            return operator.getName() + "-catalog";
+        case OperatorGroup.KIND:
+            return operator.getNamespace() + "-group";
+        case Subscription.KIND:
+            return operator.getName() + "-subscription";
         default:
             throw new IllegalArgumentException(String.valueOf(kind));
         }

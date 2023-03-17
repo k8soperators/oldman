@@ -10,6 +10,7 @@ import io.javaoperatorsdk.operator.processing.event.source.AbstractEventSource;
 import io.javaoperatorsdk.operator.processing.event.source.IndexerResourceCache;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceAction;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceEvent;
+import org.jboss.logging.Logger;
 
 import java.util.Collection;
 import java.util.List;
@@ -18,6 +19,9 @@ import java.util.function.Function;
 import java.util.stream.Stream;
 
 abstract class ConfigurationEventSource<T extends HasMetadata, P extends PropagatedData<T>> extends AbstractEventSource implements ResourceEventHandler<T> {
+
+    private final Logger log = Logger.getLogger(getClass());
+
     protected final IndexerResourceCache<OperatorObjectModel> primaryCache;
 
     protected ConfigurationEventSource(IndexerResourceCache<OperatorObjectModel> primaryCache) {
@@ -26,16 +30,19 @@ abstract class ConfigurationEventSource<T extends HasMetadata, P extends Propaga
 
     @Override
     public void onAdd(T obj) {
+        log.debugf("%s{namespace=%s, name=%s}: added", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
         getReferencingObjectModels(obj).forEach(this::handleEvent);
     }
 
     @Override
-    public void onUpdate(T oldObj, T newObj) {
-        getReferencingObjectModels(newObj).forEach(this::handleEvent);
+    public void onUpdate(T oldObj, T obj) {
+        log.debugf("%s{namespace=%s, name=%s}: updated", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
+        getReferencingObjectModels(obj).forEach(this::handleEvent);
     }
 
     @Override
     public void onDelete(T obj, boolean deletedFinalStateUnknown) {
+        log.debugf("%s{namespace=%s, name=%s}: deleted", obj.getKind(), obj.getMetadata().getNamespace(), obj.getMetadata().getName());
         getReferencingObjectModels(obj).forEach(this::handleEvent);
     }
 

@@ -26,23 +26,23 @@ public class BootstrapConfigMapEventHandler implements ResourceEventHandler<Conf
 
     @Override
     public void onAdd(ConfigMap bootstrap) {
-        log.infof("Bootstrap ConfigMap added", bootstrap);
+        log.infof("Bootstrap ConfigMap{namespace=%s, name=%s}: added", bootstrap.getMetadata().getNamespace(), bootstrap.getMetadata().getName());
         client.resource(toModel(bootstrap)).createOrReplace();
     }
 
     @Override
-    public void onUpdate(ConfigMap oldBootstrap, ConfigMap newBootstrap) {
-        log.infof("Bootstrap ConfigMap updated", newBootstrap);
-        client.resource(toModel(newBootstrap)).createOrReplace();
+    public void onUpdate(ConfigMap oldBootstrap, ConfigMap bootstrap) {
+        log.infof("Bootstrap ConfigMap{namespace=%s, name=%s}: updated", bootstrap.getMetadata().getNamespace(), bootstrap.getMetadata().getName());
+        client.resource(toModel(bootstrap)).createOrReplace();
     }
 
     @Override
-    public void onDelete(ConfigMap deletedBootstrap, boolean deletedFinalStateUnknown) {
+    public void onDelete(ConfigMap bootstrap, boolean deletedFinalStateUnknown) {
         // Do nothing, leaving any previously-created bootstrap CR in place
-        log.infof("Bootstrap ConfigMap deleted", deletedBootstrap);
+        log.infof("Bootstrap ConfigMap{namespace=%s, name=%s}: deleted", bootstrap.getMetadata().getNamespace(), bootstrap.getMetadata().getName());
 
         try {
-            client.resource(toModel(deletedBootstrap))
+            client.resource(toModel(bootstrap))
                 .edit(model -> {
                     Optional.ofNullable(model.getMetadata().getLabels())
                         .filter(labels -> OLDMAN.equals(labels.get(LABEL_KEY_MANAGED_BY)))

@@ -19,6 +19,12 @@ public class PropagatedSecret implements PropagatedData<Secret> {
     String type;
     boolean removed;
 
+    @Override
+    @JsonIgnore
+    public Class<Secret> getGenericType() {
+        return Secret.class;
+    }
+
     public SecretKeySelector getSource() {
         return source;
     }

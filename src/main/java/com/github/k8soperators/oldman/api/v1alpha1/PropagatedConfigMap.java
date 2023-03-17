@@ -18,6 +18,12 @@ public class PropagatedConfigMap implements PropagatedData<ConfigMap> {
     String key;
     boolean removed;
 
+    @Override
+    @JsonIgnore
+    public Class<ConfigMap> getGenericType() {
+        return ConfigMap.class;
+    }
+
     public ConfigMapKeySelector getSource() {
         return source;
     }

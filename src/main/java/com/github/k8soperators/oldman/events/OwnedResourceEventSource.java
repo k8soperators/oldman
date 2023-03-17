@@ -3,7 +3,6 @@ package com.github.k8soperators.oldman.events;
 import com.github.k8soperators.oldman.OperatorObjectModelReconciler;
 import com.github.k8soperators.oldman.api.v1alpha1.OperatorObjectModel;
 import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.informers.ResourceEventHandler;
 import io.fabric8.kubernetes.client.informers.SharedIndexInformer;
@@ -79,14 +78,7 @@ public class OwnedResourceEventSource extends AbstractEventSource implements Res
     }
 
     Stream<OperatorObjectModel> getOwners(HasMetadata obj) {
-        return primaryCache.list().filter(model -> isControllingOwner(model, obj));
-    }
-
-    boolean isControllingOwner(OperatorObjectModel model, HasMetadata obj) {
-        return obj.getOwnerReferenceFor(model)
-                .map(OwnerReference::getController)
-                .map(Boolean.TRUE::equals)
-                .orElse(false);
+        return primaryCache.list().filter(model -> model.isControllingOwner(obj));
     }
 
     void handleEvent(OperatorObjectModel model) {
