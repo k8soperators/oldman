@@ -93,12 +93,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
     private static final String STATUS_TRUE = "True";
     private static final String STATUS_FALSE = "False";
 
-    static <T> Consumer<T> noop() {
+    static <T> Consumer<T> doNothing() {
         return x -> { };
-    }
-
-    static Runnable runNothing() {
-        return () -> { };
     }
 
     private final KubernetesClient client;
@@ -201,7 +197,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
             .stream()
             .filter(c -> isConditionType(c, conditionType))
             .findFirst()
-            .ifPresentOrElse(noop(), () -> status.updateCondition(conditionType, STATUS_FALSE, null, null));
+            .ifPresentOrElse(doNothing(), () -> status.updateCondition(conditionType, STATUS_FALSE, null, null));
     }
 
     @Override
@@ -459,7 +455,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         Optional.ofNullable(result.getStatus())
             .map(CatalogSourceStatus::getConditions)
             .filter(Predicate.not(Collection::isEmpty))
-            .ifPresentOrElse(conditions ->
+            .ifPresent(conditions ->
                     model.getStatus().mergeCondition(new ConditionBuilder()
                             .withType(CONDITION_ERROR)
                             .withStatus(STATUS_TRUE)
@@ -468,8 +464,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                                     operator.getNamespace(),
                                     subresource.name(operator),
                                     conditions.stream().map(Condition::getMessage).collect(Collectors.joining("; "))))
-                            .build()),
-                    runNothing());
+                            .build()));
     }
 
     void reconcileOperatorGroup(OperatorObjectModel model, OperatorSource operator, Subresource<OperatorGroup, OperatorGroupSpec> operatorGroup) {
@@ -505,7 +500,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         Optional.ofNullable(result.getStatus())
             .map(OperatorGroupStatus::getConditions)
             .filter(Predicate.not(Collection::isEmpty))
-            .ifPresentOrElse(conditions ->
+            .ifPresent(conditions ->
                     model.getStatus().mergeCondition(new ConditionBuilder()
                             .withType(CONDITION_ERROR)
                             .withStatus(STATUS_TRUE)
@@ -514,8 +509,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                                     operator.getNamespace(),
                                     subresource.name(operator),
                                     conditions.stream().map(Condition::getMessage).collect(Collectors.joining("; "))))
-                            .build()),
-                    runNothing());
+                            .build()));
     }
 
     void reconcileSubscription(OperatorObjectModel model, OperatorSource operator, Subresource<Subscription, SubscriptionSpec> subresource) {
