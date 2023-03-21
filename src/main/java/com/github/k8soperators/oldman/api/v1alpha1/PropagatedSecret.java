@@ -47,18 +47,11 @@ public class PropagatedSecret implements PropagatedData<Secret> {
 
     @Override
     @JsonIgnore
-    public boolean isSourceMissing(Secret secret) {
-        if (secret == null) {
-            return true;
-        }
-
-        String sourceKey = getSourceKey();
-
-        if (sourceKey == null) {
+    public boolean hasKey(Secret secret, String sourceKey) {
+        if (secret == null || sourceKey == null) {
             return false;
         }
-
-        return !hasKey(secret.getData(), sourceKey) && !hasKey(secret.getStringData(), sourceKey);
+        return hasKey(secret.getData(), sourceKey) || hasKey(secret.getStringData(), sourceKey);
     }
 
     @Override

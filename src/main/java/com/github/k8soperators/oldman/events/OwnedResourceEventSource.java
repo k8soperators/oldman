@@ -78,7 +78,7 @@ public class OwnedResourceEventSource extends AbstractEventSource implements Res
     }
 
     Stream<OperatorObjectModel> getOwners(HasMetadata obj) {
-        return primaryCache.list().filter(model -> model.isControllingOwner(obj));
+        return primaryCache.list().filter(model -> obj.getOwnerReferenceFor(model).isPresent());
     }
 
     void handleEvent(OperatorObjectModel model) {

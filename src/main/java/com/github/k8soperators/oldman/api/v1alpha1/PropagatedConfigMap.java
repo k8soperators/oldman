@@ -46,18 +46,11 @@ public class PropagatedConfigMap implements PropagatedData<ConfigMap> {
 
     @Override
     @JsonIgnore
-    public boolean isSourceMissing(ConfigMap configMap) {
-        if (configMap == null) {
-            return true;
-        }
-
-        String sourceKey = getSourceKey();
-
-        if (sourceKey == null) {
+    public boolean hasKey(ConfigMap configMap, String sourceKey) {
+        if (configMap == null || sourceKey == null) {
             return false;
         }
-
-        return !hasKey(configMap.getData(), sourceKey) && !hasKey(configMap.getBinaryData(), sourceKey);
+        return hasKey(configMap.getData(), sourceKey) || hasKey(configMap.getBinaryData(), sourceKey);
     }
 
     @Override

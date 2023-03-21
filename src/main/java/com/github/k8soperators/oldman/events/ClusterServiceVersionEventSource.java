@@ -94,7 +94,7 @@ public class ClusterServiceVersionEventSource extends AbstractEventSource implem
             .stream()
             .filter(sub -> Objects.nonNull(sub.getStatus()))
             .filter(sub -> Objects.equals(obj.getMetadata().getName(), sub.getStatus().getInstalledCSV()))
-            .flatMap(sub -> primaryCache.list().filter(model -> model.isControllingOwner(sub)));
+            .flatMap(sub -> primaryCache.list().filter(model -> sub.getOwnerReferenceFor(model).isPresent()));
     }
 
     void handleEvent(OperatorObjectModel model) {

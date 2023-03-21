@@ -145,6 +145,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public UpdateControl<OperatorObjectModel> reconcile(OperatorObjectModel model, Context<OperatorObjectModel> context) {
+        log.debugf("Reconciling %s{name=%s}", model.getClass().getSimpleName(), model.getMetadata().getName());
+
         /*
          * To-Do List:
          *
@@ -358,7 +360,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                 .get();
 
         if (!configuration.isRemoved() && configuration.isSourceMissing(source)) {
-            return handleMissingDataSource(configuration, resourceType);
+            return handleMissingDataSource(configuration, source);
         }
 
         String targetNamespace = operator.getNamespace();
@@ -380,13 +382,28 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         return null;
     }
 
-    Condition handleMissingDataSource(PropagatedData<?> configuration, Class<?> resourceType) {
+    <T> Condition handleMissingDataSource(PropagatedData<T> configuration, T source) {
+        Class<T> resourceType = configuration.getGenericType();
+        String sourceName = configuration.getSourceName();
+        String sourceKey = configuration.getSourceKey();
+
+        if (log.isDebugEnabled()) {
+            if (source != null) {
+                if (sourceKey != null) {
+                    log.debugf("Source missing key %s (hasKey: %s): %s", sourceKey, configuration.hasKey(source, sourceKey), source);
+                } else {
+                    log.debugf("Source: %s", source);
+                }
+            } else {
+                log.debugf("Source %s{name=%s} is missing", resourceType.getSimpleName(), sourceName);
+            }
+        }
+
         if (!configuration.isSourceOptional()) {
-            String sourceName = configuration.getSourceName();
             String message;
 
-            if (configuration.getSourceKey() != null) {
-                message = String.format("%s{name=%s, key=%s} is required", resourceType.getSimpleName(), sourceName, configuration.getSourceKey());
+            if (sourceKey != null) {
+                message = String.format("%s{name=%s, key=%s} is required", resourceType.getSimpleName(), sourceName, sourceKey);
             } else {
                 message = String.format("%s{name=%s} is required", resourceType.getSimpleName(), sourceName);
             }
@@ -636,7 +653,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         if (current != null) {
             if (hasDesiredState.test(current, desired)) {
                 log.tracef("%s{namespace=%s, name=%s}: unchanged", kind, namespace, name);
-                return current;
+                return addOwnerReference(model, current);
             } else if (model.isControllingOwner(desired)) {
                 logChanged(current, desired);
                 return client.resource(desired).replace();
