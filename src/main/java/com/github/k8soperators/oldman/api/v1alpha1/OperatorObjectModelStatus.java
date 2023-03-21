@@ -15,8 +15,6 @@ import java.util.Optional;
 
 public class OperatorObjectModelStatus extends ObservedGenerationAwareStatus {
 
-    public static final String CONDITION_READY = "Ready";
-
     @JsonProperty("lastUpdated")
     String lastUpdated;
 

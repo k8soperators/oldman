@@ -34,6 +34,7 @@ import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSource;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceSpec;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.CatalogSourceStatus;
+import io.fabric8.openshift.api.model.operatorhub.v1alpha1.ClusterServiceVersionStatus;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.Subscription;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionBuilder;
 import io.fabric8.openshift.api.model.operatorhub.v1alpha1.SubscriptionSpec;
@@ -52,8 +53,6 @@ import io.javaoperatorsdk.operator.processing.event.source.EventSource;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 
 import java.time.Duration;
@@ -108,25 +107,17 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     OwnedResourceEventSource ownedResources;
     ClusterServiceVersionEventSource csvEventSource;
-    SharedIndexInformer<ConfigMap> bootstrapInformer;
 
     public OperatorObjectModelReconciler(KubernetesClient client) {
         this.client = client;
     }
 
-    @PostConstruct
-    void initialize() {
-        bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName(bootstrapConfigMapName).inform();
-        bootstrapInformer.addEventHandler(new BootstrapConfigMapEventHandler(client));
-    }
-
-    @PreDestroy
-    void shutdown() {
-        bootstrapInformer.close();
-    }
-
     @Override
     public Map<String, EventSource> prepareEventSources(EventSourceContext<OperatorObjectModel> context) {
+        BootstrapConfigMapEventHandler bootstrapHandler = new BootstrapConfigMapEventHandler(client, context.getPrimaryCache());
+        SharedIndexInformer<ConfigMap> bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName(bootstrapConfigMapName).inform();
+        bootstrapInformer.addEventHandler(bootstrapHandler);
+
         ConfigMapEventSource configMapEventSource = new ConfigMapEventSource(context.getPrimaryCache());
         SharedIndexInformer<ConfigMap> configMapInformer = client.configMaps().inNamespace(client.getNamespace()).inform();
         configMapInformer.addEventHandler(configMapEventSource);
@@ -561,6 +552,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
         Optional.ofNullable(result.getStatus())
             .map(SubscriptionStatus::getInstalledCSV)
             .map(installedCsv -> csvEventSource.get(operator.getNamespace(), installedCsv))
+            .filter(installedCsv -> Optional.ofNullable(installedCsv.getStatus()).map(ClusterServiceVersionStatus::getPhase).isPresent())
             .ifPresentOrElse(
                     installedCsv -> {
                         var csvStatus = installedCsv.getStatus();
@@ -604,7 +596,7 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
                                 .withType(CONDITION_INPROGRESS)
                                 .withStatus(STATUS_TRUE)
                                 .withMessage(String.format(
-                                        "ClusterServiceVersion for Subscription %s/%s not yet created",
+                                        "ClusterServiceVersion for Subscription %s/%s not yet created or not reporting status",
                                         operator.getNamespace(),
                                         subresource.name(operator)))
                                 .build()));

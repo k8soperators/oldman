@@ -8,7 +8,7 @@ import java.util.List;
 
 @JsonDeserialize(using = com.fasterxml.jackson.databind.JsonDeserializer.None.class)
 @JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonPropertyOrder({ "configMaps", "secrets", "operators" })
+@JsonPropertyOrder({ "operators" })
 public class OperatorObjectModelSpec {
 
     List<OperatorSource> operators;
