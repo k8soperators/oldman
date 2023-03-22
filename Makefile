@@ -60,6 +60,12 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	mvn package -Dquarkus.container-image.push=true -Dquarkus.container-image.image=${IMG}
 
+docker-build-native: ## Build docker image with the manager.
+	mvn package -Pnative -Dquarkus.container-image.build=true -Dquarkus.container-image.image=${IMG}
+
+docker-push-native: ## Push docker image with the manager.
+	mvn package -Pnative -Dquarkus.container-image.push=true -Dquarkus.container-image.image=${IMG}
+
 ##@ Deployment
 
 install: ## Install CRDs into the K8s cluster specified in ~/.kube/config.

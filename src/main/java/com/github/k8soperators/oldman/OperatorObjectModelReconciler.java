@@ -114,6 +114,8 @@ public class OperatorObjectModelReconciler implements Reconciler<OperatorObjectM
 
     @Override
     public Map<String, EventSource> prepareEventSources(EventSourceContext<OperatorObjectModel> context) {
+        log.infof("Custom resource label selector: %s", context.getControllerConfiguration().getLabelSelector());
+
         BootstrapConfigMapEventHandler bootstrapHandler = new BootstrapConfigMapEventHandler(client, context.getPrimaryCache());
         SharedIndexInformer<ConfigMap> bootstrapInformer = client.resources(ConfigMap.class).inNamespace(client.getNamespace()).withName(bootstrapConfigMapName).inform();
         bootstrapInformer.addEventHandler(bootstrapHandler);
